@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+Boute_Exports/
+examples/
+validation_outputs/
+.env
+.env.*
+!.env.example
+.aws/
+.codex/
+.agents/
+.DS_Store
+Thumbs.db
