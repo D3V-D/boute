@@ -1,4 +1,4 @@
-# Boute
+# Boute 🪰🤸
 
 Small desktop tool that takes a behavior video and its B-SOiD labels and makes one montage video per behavior group.
 
