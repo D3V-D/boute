@@ -1,6 +1,6 @@
 # Boute
 
-A minimal, local desktop utility for turning B-SOiD behavioral labels into per-group video montages. White interface, native file dropping, and bundled Lucide upload icons. No accounts, uploads, or network access during analysis.
+A minimal, local desktop utility for turning B-SOiD behavioral labels into per-group video montages.
 
 ## Open Boute
 
