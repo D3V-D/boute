@@ -53,7 +53,7 @@ Groups that are in the labels but not in the video are listed with zero frames a
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-On Windows, use `.venv\Scripts\python.exe` instead. Drag-and-drop and the native dialogs haven't been automated, so check those by hand on each OS. See `VALIDATION.md` for what was checked.
+On Windows, use `.venv\Scripts\python.exe` instead. Drag-and-drop and the native dialogs haven't been automated, so check those by hand on each OS.
 
 ## Layout
 
