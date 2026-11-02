@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -21,11 +21,15 @@ from PIL import Image, ImageTk
 from .core import AlignmentRequired, InputError, align, classify, filename_rate, generate, inspect_video, merge_groups, merge_results, read_labels, rename_group, group_export_filename
 from .dnd import uri_paths
 from .timeline import JumpMarkers, read_jumps
+from .pose import read_pose, align_pose, save_pose, draw_pose
+from .pose_view import PoseViewerMixin
 
 WHITE = '#ffffff'
-INK = '#252525'
-MUTED = '#777777'
-LIGHT = '#f4f4f4'
+INK = '#18181b'
+MUTED = '#71717a'
+LIGHT = '#f4f4f5'
+BORDER = '#e4e4e7'
+FONT = 'Segoe UI' if sys.platform == 'win32' else 'Helvetica Neue' if sys.platform == 'darwin' else 'DejaVu Sans'
 
 
 def group_button_text(group):
@@ -48,7 +52,7 @@ def dialog_filters(filetypes):
     return {} if sys.platform == 'darwin' else {'filetypes': filetypes}
 
 
-class App(TkinterDnD.Tk):
+class App(PoseViewerMixin, TkinterDnD.Tk):
     def __init__(self):
         self.dnd_enabled = True
         try:
@@ -58,10 +62,22 @@ class App(TkinterDnD.Tk):
             # Keep the file pickers usable when that platform library cannot load.
             self.dnd_enabled = False
         self.title('Boute')
-        self.geometry('1120x740')
-        self.minsize(820, 560)
+        self.geometry('1380x880')
+        self.minsize(1100, 700)
         self.configure(bg=WHITE)
         ctk.set_appearance_mode('light')
+        self.viewer_active = False
+        self.pose_exporting = False
+        self.pose_data = None
+        self.pose_output = None
+        self.pose_preferences = {}
+        self.pose_message = ''
+        self.pose_report = None
+        self.pose_request = 0
+        self.pose_cancel = threading.Event()
+        self.background_jobs = []
+        self.current_frame = None
+        self.current_frame_number = 0
         self.files = {}
         self.analysis = None
         self.merging = False
@@ -77,15 +93,23 @@ class App(TkinterDnD.Tk):
         self.upload()
         self.after(60, self.poll)
 
-    def button(self, parent, text, command, **kwargs):
-        return ctk.CTkButton(parent, text=text, command=command, fg_color=LIGHT,
-                             hover_color='#e9e9e9', text_color=INK, corner_radius=6,
-                             height=34, font=('Arial', 13), **kwargs)
+    def button(self, parent, text, command, primary=False, **kwargs):
+        options = dict(fg_color=INK if primary else WHITE,
+                       hover_color='#27272a' if primary else LIGHT,
+                       text_color=WHITE if primary else INK, corner_radius=6,
+                       border_width=0 if primary else 1, border_color=BORDER,
+                       height=34, font=(FONT, 12))
+        options.update(kwargs)
+        return ctk.CTkButton(parent, text=text, command=command, **options)
 
     def label(self, parent, text, size=14, color=INK, **kwargs):
-        return tk.Label(parent, text=text, bg=WHITE, fg=color, font=('Arial', size), **kwargs)
+        return tk.Label(parent, text=text, bg=WHITE, fg=color, font=(FONT, size), **kwargs)
 
     def clear(self):
+        self.viewer_active = False
+        self.pose_cancel.set()
+        self.pose_request += 1
+        self.current_frame = None
         self.stop_preview()
         for child in self.winfo_children():
             child.destroy()
@@ -93,6 +117,11 @@ class App(TkinterDnD.Tk):
     def upload(self):
         self.clear()
         self.zones = []
+        header = tk.Frame(self, bg=WHITE)
+        header.pack(fill='x', padx=40, pady=(36, 12))
+        self.label(header, 'Boute', 28).pack(anchor='w')
+        self.label(header, 'From behavioral clusters to research observations.', 13, MUTED).pack(anchor='w', pady=(8, 0))
+        self.label(header, 'Load a recording and B-SOiD labels. Pose coordinates in labels_pose are detected automatically.', 12, MUTED).pack(anchor='w', pady=(8, 0))
         body = tk.Frame(self, bg=WHITE)
         body.pack(fill='both', expand=True)
         body.rowconfigure(0, weight=1)
@@ -101,8 +130,8 @@ class App(TkinterDnD.Tk):
             ('labels', 'Choose B-SOiD results CSV', 'Look for “labels_pose” in the filename.\nClick to browse, or drop the CSV here.'),
         ]):
             body.columnconfigure(index, weight=1, uniform='uploads')
-            zone = tk.Frame(body, bg=WHITE)
-            zone.grid(row=0, column=index, sticky='nsew')
+            zone = tk.Frame(body, bg=WHITE, highlightbackground=BORDER, highlightthickness=1)
+            zone.grid(row=0, column=index, sticky='nsew', padx=(32 if index == 0 else 12, 12 if index == 0 else 32), pady=16)
             center = tk.Frame(zone, bg=WHITE)
             center.place(relx=.5, rely=.5, anchor='center', relwidth=.94)
             icon = tk.Canvas(center, width=56, height=56, bg=WHITE, highlightthickness=0)
@@ -129,7 +158,7 @@ class App(TkinterDnD.Tk):
         footer = tk.Frame(self, bg=WHITE, height=90)
         footer.pack(fill='x')
         footer.pack_propagate(False)
-        self.continue_button = self.button(footer, 'Continue →', self.start, width=130)
+        self.continue_button = self.button(footer, 'Analyze recording →', self.start, width=180, primary=True)
         self.refresh_inputs()
 
     def highlight(self, widgets, color):
@@ -198,8 +227,20 @@ class App(TkinterDnD.Tk):
                 output = generate(self.files['video'], self.files['labels'], [],
                                   labels, mapped, info, Path.home() / 'Boute_Exports', actual_rate, offset,
                                   lambda p, s: self.events.put(('progress', (p, s))), self.cancel)
+                pose_notice = None
+                self.events.put(('progress', (1, 'Checking pose coordinates…')))
+                try:
+                    raw_pose = read_pose(self.files['labels'])
+                    if raw_pose is not None:
+                        if len(raw_pose.xy) != len(labels):
+                            raise InputError('Pose rows do not match the behavioral labels. Load the pose CSV separately.')
+                        save_pose(output, align_pose(raw_pose, info, actual_rate, offset))
+                except (InputError, ValueError, OSError) as error:
+                    pose_notice = f'Video groups are ready. Pose import needs attention: {error}'
                 analysis = (labels, mapped, info, actual_rate, offset, {int(g): int(g) for g in set(labels)})
                 self.events.put(('done', (output, analysis, None)))
+                if pose_notice:
+                    self.events.put(('pose_notice', pose_notice))
             except AlignmentRequired as error:
                 self.events.put(('alignment', (str(error), filename_rate(self.files['labels']))))
             except Exception as error:
@@ -234,6 +275,10 @@ class App(TkinterDnD.Tk):
                     self.output, self.analysis, selected_id = data
                     self.merging = False
                     self.viewer(selected_id)
+                elif kind == 'pose_notice':
+                    self.pose_status.configure(text=data)
+                elif kind.startswith('pose_'):
+                    self.handle_pose_event(kind, data)
                 elif kind == 'alignment':
                     self.alignment_dialog(*data)
                 elif kind == 'error':
@@ -284,65 +329,89 @@ class App(TkinterDnD.Tk):
         with (self.output / 'group_summary.csv').open(encoding='utf-8', newline='') as stream:
             self.groups = list(csv.DictReader(stream))
         self.group_jumps = read_jumps(self.output / 'frame_manifest.csv')
-        sidebar = ctk.CTkScrollableFrame(self, width=210, fg_color=WHITE, corner_radius=0)
-        sidebar.pack(side='left', fill='y', padx=(20, 12), pady=26)
-        self.label(sidebar, 'Select groups to merge', 12, MUTED).pack(anchor='w', pady=(0, 8))
-        self.merge_button = self.button(sidebar, 'Merge selected', self.merge_selected, width=190)
+        style = ttk.Style(self)
+        style.theme_use('clam')
+        style.configure('Boute.Treeview', background=WHITE, fieldbackground=WHITE, foreground=INK,
+                        rowheight=28, borderwidth=0, font=(FONT, 10))
+        style.configure('Boute.Treeview.Heading', background=LIGHT, foreground=MUTED,
+                        font=(FONT, 10), relief='flat', padding=6)
+        style.map('Boute.Treeview', background=[('selected', '#e4e4e7')], foreground=[('selected', INK)])
+        top = tk.Frame(self, bg=WHITE, highlightbackground=BORDER, highlightthickness=1)
+        top.pack(fill='x')
+        self.label(top, 'Boute  /  Behavior workspace', 14).pack(side='left', padx=24, pady=16)
+        self.button(top, 'New analysis', self.new_analysis, width=110).pack(side='right', padx=20, pady=10)
+        shell = tk.PanedWindow(self, orient='horizontal', bg=LIGHT, sashwidth=6, borderwidth=0)
+        shell.pack(fill='both', expand=True)
+        rail = tk.Frame(shell, bg=WHITE)
+        shell.add(rail, minsize=195, width=215)
+        self.label(rail, 'Groups', 17).pack(anchor='w', padx=16, pady=(20, 4))
+        self.label(rail, 'Select groups to combine', 11, MUTED).pack(anchor='w', padx=16, pady=(0, 12))
+        self.merge_button = self.button(rail, 'Merge selected', self.merge_selected, primary=True)
         self.merge_button.configure(state='disabled')
-        self.merge_button.pack(fill='x', pady=(0, 8))
-        self.label(sidebar, 'Uses the lowest selected ID.', 11, MUTED).pack(anchor='w', pady=(0, 8))
-        self.group_checks = {}
-        self.group_buttons = {}
+        self.merge_button.pack(fill='x', padx=14, pady=(0, 6))
+        self.label(rail, 'Keeps the lowest selected ID.', 10, MUTED).pack(anchor='w', padx=16, pady=(0, 10))
+        sidebar = ctk.CTkScrollableFrame(rail, width=180, fg_color=WHITE, corner_radius=0)
+        sidebar.pack(fill='both', expand=True, padx=6, pady=(0, 12))
+        self.group_checks, self.group_buttons = {}, {}
         for group in self.groups:
             gid = group['group_id']
             row = tk.Frame(sidebar, bg=WHITE)
             row.pack(fill='x', pady=3)
             checked = tk.BooleanVar(value=False)
             self.group_checks[gid] = checked
-            ctk.CTkCheckBox(row, text='', width=24, variable=checked,
-                            command=self.update_merge_selection, checkbox_width=18, checkbox_height=18).pack(side='left')
-            b = self.button(row, group_button_text(group), lambda g=group: self.select_group(g), width=164, anchor='w')
-            b.configure(fg_color=WHITE, height=52 if group.get('group_name') else 34)
-            b.pack(side='left')
-            self.group_buttons[gid] = b
-        main = tk.Frame(self, bg=WHITE)
-        main.pack(side='left', fill='both', expand=True, padx=(20, 36), pady=32)
-        heading = tk.Frame(main, bg=WHITE)
-        heading.pack(fill='x')
-        self.group_title = self.label(heading, '', 22, wraplength=400, justify='left')
-        self.group_title.pack(side='left')
-        self.button(heading, 'New analysis', self.new_analysis, width=110).pack(side='right')
-        self.details = self.label(main, '', 12, MUTED)
-        self.details.pack(anchor='w', pady=(8, 12))
-        name_row = tk.Frame(main, bg=WHITE)
+            ctk.CTkCheckBox(row, text='', width=22, variable=checked, fg_color=INK,
+                            command=self.update_merge_selection, checkbox_width=16, checkbox_height=16).pack(side='left')
+            button = self.button(row, group_button_text(group), lambda g=group: self.select_group(g), width=145,
+                                 anchor='w', border_width=0, height=52 if group.get('group_name') else 36)
+            button.pack(side='left', fill='x', expand=True)
+            self.group_buttons[gid] = button
+        main = tk.Frame(shell, bg=WHITE)
+        shell.add(main, minsize=435, stretch='always')
+        content = tk.Frame(main, bg=WHITE)
+        content.pack(fill='both', expand=True, padx=20, pady=20)
+        self.group_title = self.label(content, '', 21, wraplength=400, justify='left')
+        self.group_title.pack(anchor='w', fill='x')
+        self.group_title.bind('<Configure>', lambda event: self.group_title.configure(wraplength=max(200, event.width-2)))
+        self.details = self.label(content, '', 11, MUTED)
+        self.details.pack(anchor='w', pady=(6, 16))
+        name_row = tk.Frame(content, bg=WHITE)
         name_row.pack(fill='x', pady=(0, 4))
-        self.name_entry = ctk.CTkEntry(name_row, placeholder_text='Behavior name (e.g. grooming?)')
+        self.name_entry = ctk.CTkEntry(name_row, placeholder_text='Behavior name (e.g. grooming?)',
+                                      fg_color=WHITE, border_color=BORDER, text_color=INK, height=34, corner_radius=6)
         self.name_entry.pack(side='left', fill='x', expand=True, padx=(0, 8))
         self.name_entry.bind('<Return>', lambda event: self.save_group_name())
-        self.button(name_row, 'Save name', self.save_group_name, width=100).pack(side='right')
-        self.name_hint = self.label(main, 'Optional researcher label · Blank restores the group ID.', 11, MUTED)
-        self.name_hint.pack(anchor='w', pady=(0, 12))
-        self.preview = tk.Label(main, bg=WHITE)
-        self.preview.pack(fill='both', expand=True)
-        timeline_area = tk.Frame(main, bg=WHITE)
-        timeline_area.pack(fill='x', pady=18)
+        self.button(name_row, 'Save name', self.save_group_name, width=95).pack(side='right')
+        self.name_hint = self.label(content, 'Optional researcher label · Blank restores the group ID.', 10, MUTED)
+        self.name_hint.pack(anchor='w', pady=(0, 14))
+        video_card = tk.Frame(content, bg=LIGHT, highlightbackground=BORDER, highlightthickness=1)
+        video_card.pack(fill='both', expand=True)
+        self.preview = tk.Label(video_card, bg=LIGHT)
+        self.preview.pack(fill='both', expand=True, padx=6, pady=6)
+        self.preview.bind('<Configure>', lambda event: self.render_current_frame())
+        timeline_area = tk.Frame(content, bg=WHITE)
+        timeline_area.pack(fill='x', pady=(12, 10))
         self.jump_markers = JumpMarkers(timeline_area, command=self.seek)
         self.jump_markers.pack(fill='x')
-        self.timeline = ctk.CTkSlider(timeline_area, from_=0, to=1, number_of_steps=1, command=self.seek, progress_color='#888888', button_color='#555555', button_hover_color='#333333', fg_color=LIGHT)
+        self.timeline = ctk.CTkSlider(timeline_area, from_=0, to=1, number_of_steps=1, command=self.seek,
+                                     progress_color=INK, button_color=INK, button_hover_color='#3f3f46', fg_color=BORDER)
         self.timeline.pack(fill='x')
-        self.label(timeline_area, 'Orange ticks mark frame jumps · Hover for details, click to seek.', 11, MUTED).pack(anchor='w', pady=(5, 0))
-        controls = tk.Frame(main, bg=WHITE)
+        self.label(timeline_area, 'Orange ticks = source-frame gaps · Hover for details', 10, MUTED).pack(anchor='w', pady=(5, 0))
+        controls = tk.Frame(content, bg=WHITE)
         controls.pack(fill='x')
-        self.play_button = self.button(controls, 'Play', self.toggle, width=70)
+        self.play_button = self.button(controls, 'Play', self.toggle, width=58, primary=True)
         self.play_button.pack(side='left')
-        self.speed = ctk.CTkOptionMenu(controls, values=['0.25×', '0.5×', '1×', '2×'], width=85, fg_color=LIGHT, button_color=LIGHT, button_hover_color='#e9e9e9', text_color=INK)
+        self.speed = ctk.CTkOptionMenu(controls, values=['0.25×', '0.5×', '1×', '2×'], width=64,
+                                      fg_color=LIGHT, button_color=BORDER, button_hover_color='#d4d4d8', text_color=INK)
         self.speed.set('1×')
-        self.speed.pack(side='left', padx=12)
-        self.export_button = self.button(controls, 'Export MP4', self.export, width=110)
+        self.speed.pack(side='left', padx=4)
+        self.export_button = self.button(controls, 'Export MP4', self.export, width=90)
         self.export_button.pack(side='right')
-        self.button(controls, 'Open folder', self.open_folder, width=110).pack(side='right', padx=10)
-        self.label(main, 'Frame montages · Disconnected moments may appear continuous.', 11, MUTED).pack(anchor='w', pady=(22, 4))
-        self.label(main, 'Verify that the video and labels describe the same fly and experiment.', 11, MUTED).pack(anchor='w')
+        self.button(controls, 'Folder', self.open_folder, width=54).pack(side='right', padx=3)
+        self.label(content, 'Frame montage · Verify the recording and label identity.', 10, MUTED).pack(anchor='w', pady=(14, 0))
+        research = tk.Frame(shell, bg=WHITE)
+        shell.add(research, minsize=330, width=385)
+        self.build_pose_panel(research)
+        self.viewer_active = True
         self.select_group(next((g for g in self.groups if g['group_id'] == str(selected_id)), self.groups[0]))
 
     def save_group_name(self):
@@ -396,6 +465,10 @@ class App(TkinterDnD.Tk):
     def select_group(self, group):
         self.stop_preview()
         self.selected = group
+        self.current_frame = None
+        self.current_frame_number = 0
+        if hasattr(self, 'pose_status'):
+            self.prepare_group_pose()
         for gid, button in self.group_buttons.items():
             button.configure(fg_color=LIGHT if gid == group['group_id'] else WHITE)
         self.group_title.configure(text=group_heading(group))
@@ -428,12 +501,24 @@ class App(TkinterDnD.Tk):
         ok, frame = self.cap.read()
         if not ok:
             return False
+        self.current_frame = frame
+        self.current_frame_number = max(0, int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
+        self.render_current_frame()
+        self.timeline.set(self.current_frame_number)
+        return True
+
+    def render_current_frame(self):
+        if self.current_frame is None:
+            return
+        frame = self.current_frame
+        if self.pose_data is not None and hasattr(self, 'show_dots') and self.show_dots.get():
+            if self.current_frame_number < len(self.current_pose_indices):
+                frame = draw_pose(frame, self.pose_data, int(self.current_pose_indices[self.current_frame_number]),
+                                  self.selected_pose_parts(), self.pose_threshold.get(), self.show_part_labels.get())
         image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        image.thumbnail((max(100, self.preview.winfo_width()), max(100, self.preview.winfo_height())), Image.Resampling.LANCZOS)
+        image.thumbnail((max(1, self.preview.winfo_width()-4), max(1, self.preview.winfo_height()-4)), Image.Resampling.LANCZOS)
         self.photo = ImageTk.PhotoImage(image)
         self.preview.configure(image=self.photo, text='')
-        self.timeline.set(max(0, self.cap.get(cv2.CAP_PROP_POS_FRAMES) - 1))
-        return True
 
     def toggle(self):
         if self.cap is None:
@@ -494,9 +579,10 @@ class App(TkinterDnD.Tk):
         if self.closed:
             return
         self.closing = True
+        self.pose_cancel.set()
         self.cancel.set()
         self.stop_preview()
-        if self.worker and self.worker.is_alive():
+        if (self.worker and self.worker.is_alive()) or any(job.is_alive() for job in self.background_jobs):
             self.after(60, self.close)
             return
         self.closed = True

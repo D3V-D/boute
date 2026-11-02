@@ -380,6 +380,8 @@ def merge_results(previous: Path, selected: list[int], info: VideoInfo,
                                     for original, current in sorted(mapping.items()))
         shutil.copy2(previous / 'source_metadata.txt', output / 'source_metadata.txt')
         shutil.copytree(previous / 'source_csvs', output / 'source_csvs')
+        if (previous / 'pose_data.npz').exists():
+            shutil.copy2(previous / 'pose_data.npz', output / 'pose_data.npz')
         check_cancel()
         complete = True
         progress(1, 'Ready')

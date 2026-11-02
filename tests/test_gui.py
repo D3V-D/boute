@@ -9,6 +9,19 @@ from boute.gui import App
 
 
 class GuiTests(unittest.TestCase):
+    def test_pose_results_ignore_stale_groups_and_inactive_viewers(self):
+        from boute.pose_view import PoseViewerMixin
+        app = SimpleNamespace(viewer_active=False, pose_request=2, output=Path('/results'),
+                              pose_cancel=Mock(), pose_status=Mock(), show_pose_report=Mock())
+        PoseViewerMixin.handle_pose_event(app, 'pose_report', (2, app.output, {}, None))
+        app.show_pose_report.assert_not_called()
+        app.viewer_active = True
+        app.pose_cancel.is_set.return_value = False
+        PoseViewerMixin.handle_pose_event(app, 'pose_report', (1, app.output, {}, None))
+        app.show_pose_report.assert_not_called()
+        PoseViewerMixin.handle_pose_event(app, 'pose_report', (2, app.output, {'group_id': 3}, None))
+        app.show_pose_report.assert_called_once_with({'group_id': 3})
+
     def test_renaming_updates_display_without_reopening_video(self):
         group = {'group_id': '3', 'percentage': '75', 'group_name': ''}
         entry = Mock()
@@ -105,7 +118,7 @@ class GuiTests(unittest.TestCase):
         app.after.assert_not_called()
 
     def test_close_marks_closing_before_waiting_for_worker(self):
-        app = SimpleNamespace(closed=False, closing=False, cancel=Mock(), stop_preview=Mock(),
+        app = SimpleNamespace(closed=False, closing=False, cancel=Mock(), pose_cancel=Mock(), background_jobs=[], stop_preview=Mock(),
                               worker=Mock(), after=Mock(), close=Mock(), destroy=Mock())
         app.worker.is_alive.return_value = True
         App.close(app)
