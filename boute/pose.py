@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 
 from .core import InputError, VideoInfo, align, inspect_video
+from .comparisons import GroupComparisons, COMPARISON_METHOD
 
 
 @dataclass
@@ -212,6 +213,7 @@ def analyze_pose(pose: PoseData, groups: np.ndarray, info: VideoInfo, group_id: 
         body_valid &= good_axis[:, None]
     speed = np.linalg.norm(np.diff(xy, axis=0), axis=2) / time_delta[:, None]
     body_speed = np.linalg.norm(np.diff(relative, axis=0), axis=2) / time_delta[:, None]
+    comparisons = GroupComparisons(groups, continuity, group_id, cancel)
     parts = []
     for index, name in enumerate(pose.names):
         if cancel is not None and cancel.is_set():
@@ -222,6 +224,12 @@ def analyze_pose(pose: PoseData, groups: np.ndarray, info: VideoInfo, group_id: 
         baseline = _value(speed[:, index], paired & other_pairs)
         body_median = _value(body_speed[:, index], body_paired & group_pairs)
         body_baseline = _value(body_speed[:, index], body_paired & other_pairs)
+        if index != reference:
+            comparisons.add(f'body_speed:{name}', 'movement', name, 'body_motion',
+                            body_speed[:, index], body_paired, body_valid[:, index], 'px/s', .1)
+        else:
+            comparisons.add(f'reference_speed:{name}', 'movement', name + ' (reference)', 'reference_motion',
+                            speed[:, index], paired, valid[:, index], 'px/s', .1)
         parts.append(dict(body_part=name, valid_frames=int((valid[:, index] & selected).sum()),
                           coverage_percent=float((valid[:, index] & selected).sum() / max(1, selected.sum()) * 100),
                           valid_motion_pairs=int((paired & group_pairs).sum()),
@@ -238,7 +246,13 @@ def analyze_pose(pose: PoseData, groups: np.ndarray, info: VideoInfo, group_id: 
             raise InputError('Pose analysis cancelled.')
         good = valid[:, a] & valid[:, b]
         distance = np.linalg.norm(xy[:, a] - xy[:, b], axis=1)
-        paired = good[1:] & good[:-1] & group_pairs
+        available_pairs = good[1:] & good[:-1]
+        paired = available_pairs & group_pairs
+        subject = pose.names[a] + ' ↔ ' + pose.names[b]
+        comparisons.add(f'pair_motion:{a}:{b}', 'relationships', subject, 'pair_motion',
+                        np.abs(np.diff(distance)) / time_delta, available_pairs, good, 'px/s', .1)
+        comparisons.add(f'pair_distance:{a}:{b}', 'posture', subject, 'pair_posture',
+                        distance, good, good, 'px', 1., motion=False)
         samples = distance[good & selected]
         pairs.append(dict(body_part_a=pose.names[a], body_part_b=pose.names[b],
                           valid_frames=int(len(samples)), valid_motion_pairs=int(paired.sum()),
@@ -254,6 +268,11 @@ def analyze_pose(pose: PoseData, groups: np.ndarray, info: VideoInfo, group_id: 
         denominator = np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1)
         good = valid[:, a] & valid[:, b] & valid[:, c] & (denominator > 1e-8)
         degrees = np.degrees(np.arccos(np.clip((u * v).sum(axis=1) / np.where(denominator > 1e-8, denominator, 1), -1, 1)))
+        subject = f'{pose.names[a]} → {pose.names[b]} → {pose.names[c]}'
+        comparisons.add(f'angle_speed:{a}:{b}:{c}', 'joint angle', subject, 'angle_motion',
+                        np.abs(np.diff(degrees)) / time_delta, good[1:] & good[:-1], good, '°/s', 1.)
+        comparisons.add(f'angle:{a}:{b}:{c}', 'joint angle', subject, 'angle_posture',
+                        degrees, good, good, '°', 5., motion=False)
         samples = degrees[good & selected]
         angles.append(dict(landmark_a=pose.names[a], vertex=pose.names[b], landmark_c=pose.names[c],
                            valid_frames=int(len(samples)), valid_motion_pairs=int((good[1:] & good[:-1] & group_pairs).sum()), median_angle_deg=float(np.median(samples)) if len(samples) else None,
@@ -262,10 +281,10 @@ def analyze_pose(pose: PoseData, groups: np.ndarray, info: VideoInfo, group_id: 
     return dict(group_id=int(group_id), frame_count=original_frame_count, pose_observations=int(selected.sum()), eligible_motion_pairs=int(group_pairs.sum()),
                 settings=dict(confidence=threshold, smoothing_observations=smoothing, reference=pose.names[reference],
                               axis=pose.names[axis] if axis is not None else None, fps=info.fps, video_width=info.width, video_height=info.height,
-                              source=pose.source, alignment=pose.alignment,
+                              source=pose.source, alignment=pose.alignment, comparison_method=COMPARISON_METHOD,
                               units='2D pixels and seconds; video-aligned sampling with repeated pose samples counted once',
                               method='Repeated held pose samples counted once; time deltas use original video timestamps. Median filter only within fully valid, continuous same-group observation windows. Motion excludes group boundaries and missing observations. Body coordinates subtract reference; optional axis also removes rotation. Ranges: body-part p95-p5 diagonal, pair/angle p90-p10. No missing-point interpolation. No physical-scale calibration.'),
-                body_parts=parts, pairs=pairs, angles=angles)
+                body_parts=parts, pairs=pairs, angles=angles, **comparisons.finish())
 
 
 COLORS = ((235, 99, 37), (94, 197, 34), (246, 130, 139), (255, 174, 20), (72, 180, 244), (200, 100, 200))  # BGR
@@ -339,9 +358,10 @@ def export_report(root: Path, report: dict, group_name: str) -> Path:
     output.mkdir()
     try:
         settings = dict(report['settings'], group_id=report['group_id'], group_name=group_name,
-                        frame_count=report['frame_count'], eligible_motion_pairs=report['eligible_motion_pairs'], pose_observations=report['pose_observations'])
+                        frame_count=report['frame_count'], eligible_motion_pairs=report['eligible_motion_pairs'], pose_observations=report['pose_observations'],
+                        insight_status=report['insight_status'], similarity_status=report['similarity_status'])
         (output / 'analysis_settings.json').write_text(json.dumps(settings, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
-        for name in ('body_parts', 'pairs', 'angles'):
+        for name in ('body_parts', 'pairs', 'angles', 'insights', 'similarities'):
             rows = report[name]
             if not rows:
                 continue

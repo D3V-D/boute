@@ -45,6 +45,25 @@ class PoseViewerMixin:
         ctk.CTkLabel(pane, text='Evidence for your next annotation', text_color=MUTED, font=('Arial', 12), anchor='w').pack(fill='x', pady=(0, 12))
         self.pose_status = ctk.CTkLabel(pane, text='', wraplength=320, justify='left', text_color=MUTED, anchor='w')
         self.pose_status.pack(fill='x', pady=(0, 8))
+        insight_card = ctk.CTkFrame(pane, fg_color=SOFT, corner_radius=8, border_width=1, border_color=BORDER)
+        insight_card.pack(fill='x', pady=(0, 12))
+        ctk.CTkLabel(insight_card, text='Insights for this group', text_color=INK,
+                     font=('Arial', 15, 'bold'), anchor='w').pack(fill='x', padx=12, pady=(12, 6))
+        self.group_insights_text = ctk.CTkLabel(insight_card, text='Load pose data to find distinctive movement, stability, and relationships.',
+                                               wraplength=285, justify='left', anchor='w', text_color=INK, font=('Arial', 12))
+        self.group_insights_text.pack(fill='x', padx=12, pady=(0, 10))
+        ctk.CTkLabel(insight_card, text='Compared with equally weighted groups in this recording. Descriptive differences, not behavior labels.',
+                     wraplength=285, justify='left', text_color=MUTED, font=('Arial', 10)).pack(fill='x', padx=12, pady=(0, 12))
+        ctk.CTkLabel(pane, text='Similar groups', text_color=INK, font=('Arial', 15, 'bold'), anchor='w').pack(fill='x')
+        self.similarity_note = ctk.CTkLabel(pane, text='Load pose data to compare groups.', wraplength=310,
+                                           justify='left', text_color=MUTED, font=('Arial', 10), anchor='w')
+        self.similarity_note.pack(fill='x', pady=(2, 8))
+        self.similarity_table = self.pose_table(pane, [('rank', '#', 30), ('group', 'Group', 110),
+                                                     ('distance', 'Dist. ↓', 72), ('score', 'Score', 65),
+                                                     ('shared', 'Shared features', 105)], height=4)
+        self.similarity_table.bind('<<TreeviewSelect>>', self.similarity_selected)
+        ctk.CTkLabel(pane, text='Lower distance = more similar. Families receive equal weight; features are scaled by across-group IQR. Score = 100 / (1 + distance), not a probability. Select a row to inspect that group.',
+                     wraplength=310, justify='left', text_color=MUTED, font=('Arial', 10)).pack(fill='x', pady=(4, 12))
         self.button(pane, 'Load / replace pose CSV', self.import_pose).pack(fill='x', pady=(0, 12))
         if self.pose_data is None:
             self.pose_status.configure(text=self.pose_message or 'No pose data yet. Use a DLC CSV with body-part x, y, and likelihood columns. Combined labels_pose files are loaded automatically.')
@@ -145,7 +164,7 @@ class PoseViewerMixin:
         table = ttk.Treeview(box, columns=[c[0] for c in columns], show='headings', height=height, style='Boute.Treeview')
         for key, title, width in columns:
             table.heading(key, text=title)
-            table.column(key, width=width, minwidth=60, stretch=False)
+            table.column(key, width=width, minwidth=min(60, width), stretch=False)
         vertical = ttk.Scrollbar(box, orient='vertical', command=table.yview)
         horizontal = ttk.Scrollbar(box, orient='horizontal', command=table.xview)
         table.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -175,12 +194,14 @@ class PoseViewerMixin:
             self.report_button.configure(state='disabled')
         self.confidence_value.configure(text=f'{self.pose_threshold.get():.2f}')
         self.pose_status.configure(text='Settings changed · Update analysis to refresh measurements.')
+        self.clear_group_comparisons('Settings changed. Update analysis to compare this group again.')
         self.overlay_changed()
 
     def selected_pose_parts(self):
         return [i for i, name in enumerate(self.pose_data.names) if self.part_options[name].get()]
 
     def prepare_group_pose(self):
+        self.clear_group_comparisons('Comparing this group with the rest of the recording…' if self.pose_data is not None else 'Load pose data to find distinctive movement, stability, and relationships.')
         self.pose_report = None
         self.pose_cancel.set()
         self.pose_request += 1
@@ -214,6 +235,7 @@ class PoseViewerMixin:
             self.pose_status.configure(text=str(error))
             return
         self.remember_pose_preferences()
+        self.clear_group_comparisons('Comparing this group with the rest of the recording…')
         pose, groups, info = self.pose_data, self.analysis[1], self.analysis[2]
         self.pose_status.configure(text='Analyzing continuous source segments…')
         def work():
@@ -233,6 +255,7 @@ class PoseViewerMixin:
                 return
             if error:
                 self.pose_status.configure(text=error)
+                self.clear_group_comparisons('Comparison unavailable. Check the analysis settings.')
             else:
                 self.pose_report = report
                 self.show_pose_report(report)
@@ -242,6 +265,7 @@ class PoseViewerMixin:
                 return
             if error:
                 self.pose_status.configure(text=error)
+                self.clear_group_comparisons('Comparison unavailable. Check the analysis settings.')
             else:
                 self.pose_alignment_dialog(pose)
         elif kind == 'pose_exported':
@@ -251,7 +275,37 @@ class PoseViewerMixin:
             path, error = data
             messagebox.showerror('Export failed', error, parent=self) if error else messagebox.showinfo('Export complete', f'Saved to:\n{path}', parent=self)
 
+    def clear_group_comparisons(self, message):
+        self.group_insights_text.configure(text=message)
+        self.similarity_note.configure(text='Comparison pending.' if self.pose_data is not None else 'Pose data is required for similarity.')
+        self.similarity_table.delete(*self.similarity_table.get_children())
+
+    def show_group_comparisons(self, report):
+        descriptions = []
+        for item in report['insights']:
+            evidence = (f'{item["valid_samples"]:,} valid {item["sample_kind"]} · '
+                        f'{item["coverage_percent"]:.0f}% coverage · {item["comparison_groups"]} comparison groups')
+            descriptions.append(f'{item["title"]}\n{item["description"]}\n{evidence}')
+        self.group_insights_text.configure(text='\n\n'.join(descriptions) if descriptions else report['insight_status'])
+        self.similarity_table.delete(*self.similarity_table.get_children())
+        names = {int(group['group_id']): group.get('group_name', '') for group in self.groups}
+        for row in report['similarities']:
+            row['group_name'] = names.get(row['group_id'], '')
+            name = f'Group {row["group_id"]}' + (f' · {row["group_name"]}' if row['group_name'] else '')
+            self.similarity_table.insert('', 'end', iid=str(row['group_id']), values=(row['rank'], name,
+                                         f'{row["distance"]:.3f}', number(row['similarity_score']),
+                                         f'{row["shared_features"]}/{row["available_features"]}'))
+        self.similarity_note.configure(text=f'{len(report["similarities"])} groups meet the shared-data requirements.' if report['similarities'] else report['similarity_status'])
+
+    def similarity_selected(self, event=None):
+        selected = self.similarity_table.selection()
+        if selected:
+            group = next((group for group in self.groups if group['group_id'] == selected[0]), None)
+            if group is not None:
+                self.select_group(group)
+
     def show_pose_report(self, report):
+        self.show_group_comparisons(report)
         self.report_button.configure(state='normal')
         self.pose_status.configure(text=f'{report["frame_count"]:,} video frames · {report["pose_observations"]:,} pose observations\n{report["eligible_motion_pairs"]:,} continuous observation pairs\nConfidence ≥ {report["settings"]["confidence"]:.2f} · Video-aligned sampling')
         parts = report['body_parts']

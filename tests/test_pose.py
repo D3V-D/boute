@@ -217,6 +217,28 @@ class PoseTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), retained)
         self.assertFalse(list(self.root.glob('tmp*.mp4')))
 
+    def test_end_to_end_contrasts_similarity_and_exports(self):
+        positions = []
+        for group in range(3):
+            for frame in range(10):
+                x = 30 if group == 0 else 50 + frame * (3 if group == 1 else 4)
+                positions.append([[10, 10], [x, 20], [15, 30]])
+        pose = self.pose(positions)
+        groups = np.repeat([0, 1, 2], 10)
+        report = analyze_pose(pose, groups, VideoInfo(10, 30, 200, 100), 0, smoothing=1)
+        self.assertTrue(any('Unusually stable' in item['title'] for item in report['insights']))
+        self.assertEqual(len(report['similarities']), 2)
+        self.assertEqual({row['group_id'] for row in report['similarities']}, {1, 2})
+        output = export_report(self.root, report, 'Stable cluster')
+        self.assertTrue((output / 'insights.csv').exists())
+        self.assertTrue((output / 'similarities.csv').exists())
+        settings = json.loads((output / 'analysis_settings.json').read_text())
+        self.assertIn('Distance=sqrt', settings['comparison_method'])
+        with (output / 'similarities.csv').open() as stream:
+            row = next(csv.DictReader(stream))
+        self.assertIn('distance', row)
+        self.assertIn('shared_features', row)
+
     def test_report_contains_settings_units_coverage_and_valid_samples(self):
         pose = self.pose([[[10, 10]], [[11, 10]]])
         report = analyze_pose(pose, np.zeros(2), VideoInfo(10, 2, 100, 100), 0)

@@ -54,6 +54,15 @@ with tempfile.TemporaryDirectory() as temp:
     app.geometry('1100x700')
     app.update()
     assert len(app.parts_table.get_children()) == 3
+    assert app.group_insights_text.winfo_exists()
+    assert app.similarity_table.get_children() == ('1',)
+    first_similarity = app.pose_report['similarities'][0]
+    assert first_similarity['group_id'] == 1
+    assert 0 <= first_similarity['similarity_score'] <= 100
+    app.similarity_table.selection_set('1')
+    wait_for(app, lambda: app.pose_report is not None and app.pose_report['group_id'] == 1)
+    app.select_group(app.groups[0])
+    wait_for(app, lambda: app.pose_report is not None and app.pose_report['group_id'] == 0)
     assert app.preview.winfo_width() >= 200
     assert app.preview.winfo_height() >= 100
     position = app.cap.get(cv2.CAP_PROP_POS_FRAMES)
@@ -86,6 +95,8 @@ with tempfile.TemporaryDirectory() as temp:
     report_dir = next(reports.iterdir())
     assert json.loads((report_dir / 'analysis_settings.json').read_text())['axis'] == 'Head'
     assert (report_dir / 'angles.csv').exists()
+    assert (report_dir / 'similarities.csv').exists()
+    assert 'comparison_method' in json.loads((report_dir / 'analysis_settings.json').read_text())
     annotated = root / 'annotated.mp4'
     with patch('boute.pose_view.filedialog.asksaveasfilename', return_value=str(annotated)), patch('boute.pose_view.messagebox.showinfo'):
         app.save_pose_overlay()
@@ -115,6 +126,8 @@ with tempfile.TemporaryDirectory() as temp:
     app.merge_selected()
     wait_for(app, lambda: not app.merging and app.pose_report is not None)
     assert app.pose_report['eligible_motion_pairs'] == 29
+    assert not app.pose_report['similarities']
+    assert 'No other groups' in app.group_insights_text.cget('text')
     assert len(app.pose_data.xy) == 30
     assert (app.output / 'pose_data.npz').exists()
     assert app.show_dots.get()
@@ -123,4 +136,4 @@ with tempfile.TemporaryDirectory() as temp:
     app.close()
     wait_for(app, lambda: app.closed)
     assert not errors, errors
-    print('PASS: pose auto-import, separate CSV alignment, tables, confidence, body axis, analysis/annotated exports, live overlay redraw, empty groups, small-window layout, merged continuity, preferences, shutdown')
+    print('PASS: pose import, group insights, numeric similarities and row navigation, comparison exports, confidence, body axis, overlays, empty/merged groups, layout, preferences, shutdown')
