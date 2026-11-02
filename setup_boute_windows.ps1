@@ -2,10 +2,17 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 function Find-Python {
     foreach ($name in @('py', 'python')) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        $cmd = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue
         if ($cmd) {
-            $detected = & $cmd.Source -c "import sys; print(sys.executable if sys.version_info >= (3,10) else '')" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $detected -and (Test-Path -LiteralPath "$detected")) { return "$detected" }
+            try {
+                $pythonArgs = @('-c')
+                if ($name -eq 'py') { $pythonArgs = @('-3', '-c') }
+                $detected = & $cmd.Source @pythonArgs "import sys; print(sys.executable if sys.version_info >= (3,10) else '')" 2>$null
+                if ($LASTEXITCODE -eq 0 -and $detected -and (Test-Path -LiteralPath "$detected")) { return "$detected" }
+            } catch {
+                # A broken launcher must not prevent trying the next executable.
+                continue
+            }
         }
     }
     return $null

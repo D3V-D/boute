@@ -34,5 +34,6 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         print(f'\nBoute could not start: {error}', file=sys.stderr)
-        input('Press Enter to close…')
+        if sys.stdin.isatty():
+            input('Press Enter to close…')
         sys.exit(1)

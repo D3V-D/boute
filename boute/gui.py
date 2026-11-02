@@ -18,7 +18,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 import cv2
 from PIL import Image, ImageTk
 
-from .core import AlignmentRequired, InputError, align, classify, filename_rate, generate, inspect_video, read_labels
+from .core import AlignmentRequired, InputError, align, classify, filename_rate, generate, inspect_video, merge_groups, merge_results, read_labels, rename_group, group_export_filename
 from .dnd import uri_paths
 from .timeline import JumpMarkers, read_jumps
 
@@ -28,15 +28,43 @@ MUTED = '#777777'
 LIGHT = '#f4f4f4'
 
 
+def group_button_text(group):
+    text = f'Group {group["group_id"]}     {float(group["percentage"]):.1f}%'
+    name = group.get('group_name', '')
+    if name:
+        text += '\n' + (name[:20] + '…' if len(name) > 21 else name)
+    return text
+
+
+def group_heading(group):
+    name = group.get('group_name', '')
+    return f'{name} (Group {group["group_id"]})' if name else f'Group {group["group_id"]}'
+
+
+def dialog_filters(filetypes):
+    # Some macOS Tk builds abort inside setAllowedFileTypes. This native
+    # exception cannot be caught in Python, so omit filters before opening
+    # either panel. File intake still validates the selected paths.
+    return {} if sys.platform == 'darwin' else {'filetypes': filetypes}
+
+
 class App(TkinterDnD.Tk):
     def __init__(self):
-        super().__init__()
+        self.dnd_enabled = True
+        try:
+            super().__init__()
+        except RuntimeError:
+            # TkinterDnD creates the Tk root before loading its native library.
+            # Keep the file pickers usable when that platform library cannot load.
+            self.dnd_enabled = False
         self.title('Boute')
         self.geometry('1120x740')
         self.minsize(820, 560)
         self.configure(bg=WHITE)
         ctk.set_appearance_mode('light')
         self.files = {}
+        self.analysis = None
+        self.merging = False
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.worker = None
@@ -44,6 +72,7 @@ class App(TkinterDnD.Tk):
         self.playing = False
         self.preview_job = None
         self.closed = False
+        self.closing = False
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.upload()
         self.after(60, self.poll)
@@ -84,15 +113,18 @@ class App(TkinterDnD.Tk):
                 icon.create_line(*[v*s+4 for v in points], fill='#888888', width=1.5, joinstyle='round', capstyle='round')
             text = self.label(center, title, 13, MUTED, wraplength=280)
             text.pack()
+            if not self.dnd_enabled:
+                hint = 'Click to browse for a file. Drag and drop is unavailable on this system.'
             help_text = self.label(center, hint, 12, MUTED, wraplength=340)
             help_text.pack(pady=(12, 0))
             widgets = [zone, center, icon, text, help_text]
             for widget in widgets:
                 widget.bind('<Button-1>', lambda event, k=key: self.pick(k))
-                widget.drop_target_register(DND_FILES)
-                widget.dnd_bind('<<DropEnter>>', lambda event, w=widgets: self.highlight(w, LIGHT))
-                widget.dnd_bind('<<DropLeave>>', lambda event, w=widgets: self.highlight(w, WHITE))
-                widget.dnd_bind('<<Drop>>', lambda event, w=widgets: self.drop(event, w))
+                if self.dnd_enabled:
+                    widget.drop_target_register(DND_FILES)
+                    widget.dnd_bind('<<DropEnter>>', lambda event, w=widgets: self.highlight(w, LIGHT))
+                    widget.dnd_bind('<<DropLeave>>', lambda event, w=widgets: self.highlight(w, WHITE))
+                    widget.dnd_bind('<<Drop>>', lambda event, w=widgets: self.drop(event, w))
             self.zones.append((key, text))
         footer = tk.Frame(self, bg=WHITE, height=90)
         footer.pack(fill='x')
@@ -126,8 +158,8 @@ class App(TkinterDnD.Tk):
         return 'copy'
 
     def pick(self, key):
-        types = [('Video', '*.mp4 *.avi *.mov *.mkv *.m4v *.webm *.mpeg *.mpg')] if key == 'video' else [('B-SOiD results (labels_pose)', '*labels_pose*.csv'), ('All CSV files', '*.csv')]
-        paths = filedialog.askopenfilenames(parent=self, title='Choose original video' if key == 'video' else 'Choose B-SOiD results CSV (labels_pose)', filetypes=types)
+        types = [('Video', ('*.mp4', '*.avi', '*.mov', '*.mkv', '*.m4v', '*.webm', '*.mpeg', '*.mpg')), ('All files', '*')] if key == 'video' else [('B-SOiD results (labels_pose)', '*labels_pose*.csv'), ('All CSV files', '*.csv')]
+        paths = filedialog.askopenfilenames(parent=self, title='Choose original video' if key == 'video' else 'Choose B-SOiD results CSV (labels_pose)', **dialog_filters(types))
         if paths:
             self.accept(list(paths))
 
@@ -154,6 +186,28 @@ class App(TkinterDnD.Tk):
                 if not messagebox.askyesno('Check recording identity',
                     f'The video filename identifies Fly {video_fly[1]}, but the labels identify Fly {label_fly[1]}. Matching durations do not verify recording identity.\n\nHave you verified that these files describe the same recording despite their names?', parent=self):
                     return
+        self.analysis = None
+        self.merging = False
+        self.processing_screen()
+        def work():
+            try:
+                labels = read_labels(self.files['labels'])
+                info = inspect_video(self.files['video'])
+                actual_rate = rate if manual else filename_rate(self.files['labels'])
+                mapped = align(labels, info, actual_rate, offset, manual)
+                output = generate(self.files['video'], self.files['labels'], [],
+                                  labels, mapped, info, Path.home() / 'Boute_Exports', actual_rate, offset,
+                                  lambda p, s: self.events.put(('progress', (p, s))), self.cancel)
+                analysis = (labels, mapped, info, actual_rate, offset, {int(g): int(g) for g in set(labels)})
+                self.events.put(('done', (output, analysis, None)))
+            except AlignmentRequired as error:
+                self.events.put(('alignment', (str(error), filename_rate(self.files['labels']))))
+            except Exception as error:
+                self.events.put(('error', str(error)))
+        self.worker = threading.Thread(target=work, daemon=False)
+        self.worker.start()
+
+    def processing_screen(self):
         self.clear()
         self.cancel.clear()
         center = tk.Frame(self, bg=WHITE)
@@ -165,25 +219,9 @@ class App(TkinterDnD.Tk):
         self.progress.set(0)
         self.percent = self.label(center, '', 12, MUTED)
         self.percent.pack(pady=12)
-        def work():
-            try:
-                labels = read_labels(self.files['labels'])
-                info = inspect_video(self.files['video'])
-                actual_rate = rate if manual else filename_rate(self.files['labels'])
-                mapped = align(labels, info, actual_rate, offset, manual)
-                output = generate(self.files['video'], self.files['labels'], [],
-                                  labels, mapped, info, Path.home() / 'Boute_Exports', actual_rate, offset,
-                                  lambda p, s: self.events.put(('progress', (p, s))), self.cancel)
-                self.events.put(('done', output))
-            except AlignmentRequired as error:
-                self.events.put(('alignment', (str(error), filename_rate(self.files['labels']))))
-            except Exception as error:
-                self.events.put(('error', str(error)))
-        self.worker = threading.Thread(target=work, daemon=False)
-        self.worker.start()
 
     def poll(self):
-        if self.closed:
+        if self.closed or self.closing:
             return
         try:
             while True:
@@ -193,13 +231,18 @@ class App(TkinterDnD.Tk):
                     self.status.configure(text=data[1])
                     self.percent.configure(text=f'{data[0]:.0%}')
                 elif kind == 'done':
-                    self.output = data
-                    self.viewer()
+                    self.output, self.analysis, selected_id = data
+                    self.merging = False
+                    self.viewer(selected_id)
                 elif kind == 'alignment':
                     self.alignment_dialog(*data)
                 elif kind == 'error':
                     messagebox.showerror('Analysis could not finish', data, parent=self)
-                    self.upload()
+                    if self.merging:
+                        self.merging = False
+                        self.viewer()
+                    else:
+                        self.upload()
         except queue.Empty:
             pass
         self.after(60, self.poll)
@@ -236,29 +279,49 @@ class App(TkinterDnD.Tk):
             self.start(r, o, True)
         self.button(dialog, 'Confirm and continue', confirm).pack()
 
-    def viewer(self):
+    def viewer(self, selected_id=None):
         self.clear()
-        with (self.output / 'group_summary.csv').open() as stream:
+        with (self.output / 'group_summary.csv').open(encoding='utf-8', newline='') as stream:
             self.groups = list(csv.DictReader(stream))
         self.group_jumps = read_jumps(self.output / 'frame_manifest.csv')
         sidebar = ctk.CTkScrollableFrame(self, width=210, fg_color=WHITE, corner_radius=0)
         sidebar.pack(side='left', fill='y', padx=(20, 12), pady=26)
+        self.label(sidebar, 'Select groups to merge', 12, MUTED).pack(anchor='w', pady=(0, 8))
+        self.merge_button = self.button(sidebar, 'Merge selected', self.merge_selected, width=190)
+        self.merge_button.configure(state='disabled')
+        self.merge_button.pack(fill='x', pady=(0, 8))
+        self.label(sidebar, 'Uses the lowest selected ID.', 11, MUTED).pack(anchor='w', pady=(0, 8))
+        self.group_checks = {}
         self.group_buttons = {}
         for group in self.groups:
             gid = group['group_id']
-            b = self.button(sidebar, f'Group {gid}     {float(group["percentage"]):.1f}%', lambda g=group: self.select_group(g), width=190, anchor='w')
-            b.configure(fg_color=WHITE)
-            b.pack(pady=3)
+            row = tk.Frame(sidebar, bg=WHITE)
+            row.pack(fill='x', pady=3)
+            checked = tk.BooleanVar(value=False)
+            self.group_checks[gid] = checked
+            ctk.CTkCheckBox(row, text='', width=24, variable=checked,
+                            command=self.update_merge_selection, checkbox_width=18, checkbox_height=18).pack(side='left')
+            b = self.button(row, group_button_text(group), lambda g=group: self.select_group(g), width=164, anchor='w')
+            b.configure(fg_color=WHITE, height=52 if group.get('group_name') else 34)
+            b.pack(side='left')
             self.group_buttons[gid] = b
         main = tk.Frame(self, bg=WHITE)
         main.pack(side='left', fill='both', expand=True, padx=(20, 36), pady=32)
         heading = tk.Frame(main, bg=WHITE)
         heading.pack(fill='x')
-        self.group_title = self.label(heading, '', 22)
+        self.group_title = self.label(heading, '', 22, wraplength=400, justify='left')
         self.group_title.pack(side='left')
         self.button(heading, 'New analysis', self.new_analysis, width=110).pack(side='right')
         self.details = self.label(main, '', 12, MUTED)
-        self.details.pack(anchor='w', pady=(8, 18))
+        self.details.pack(anchor='w', pady=(8, 12))
+        name_row = tk.Frame(main, bg=WHITE)
+        name_row.pack(fill='x', pady=(0, 4))
+        self.name_entry = ctk.CTkEntry(name_row, placeholder_text='Behavior name (e.g. grooming?)')
+        self.name_entry.pack(side='left', fill='x', expand=True, padx=(0, 8))
+        self.name_entry.bind('<Return>', lambda event: self.save_group_name())
+        self.button(name_row, 'Save name', self.save_group_name, width=100).pack(side='right')
+        self.name_hint = self.label(main, 'Optional researcher label · Blank restores the group ID.', 11, MUTED)
+        self.name_hint.pack(anchor='w', pady=(0, 12))
         self.preview = tk.Label(main, bg=WHITE)
         self.preview.pack(fill='both', expand=True)
         timeline_area = tk.Frame(main, bg=WHITE)
@@ -280,7 +343,46 @@ class App(TkinterDnD.Tk):
         self.button(controls, 'Open folder', self.open_folder, width=110).pack(side='right', padx=10)
         self.label(main, 'Frame montages · Disconnected moments may appear continuous.', 11, MUTED).pack(anchor='w', pady=(22, 4))
         self.label(main, 'Verify that the video and labels describe the same fly and experiment.', 11, MUTED).pack(anchor='w')
-        self.select_group(self.groups[0])
+        self.select_group(next((g for g in self.groups if g['group_id'] == str(selected_id)), self.groups[0]))
+
+    def save_group_name(self):
+        try:
+            name = rename_group(self.output, self.selected['group_id'], self.name_entry.get())
+        except (InputError, OSError, UnicodeError) as error:
+            messagebox.showerror('Could not save name', str(error), parent=self)
+            return
+        self.selected['group_name'] = name
+        button = self.group_buttons[self.selected['group_id']]
+        button.configure(text=group_button_text(self.selected), height=52 if name else 34)
+        self.group_title.configure(text=group_heading(self.selected))
+        self.name_hint.configure(text='Name saved.' if name else 'Name cleared.')
+
+    def update_merge_selection(self):
+        count = sum(var.get() for var in self.group_checks.values())
+        self.merge_button.configure(text=f'Merge selected ({count})' if count else 'Merge selected',
+                                    state='normal' if count >= 2 else 'disabled')
+
+    def merge_selected(self):
+        selected = [int(gid) for gid, var in self.group_checks.items() if var.get()]
+        if len(selected) < 2 or self.analysis is None:
+            return
+        labels, mapped, info, rate, offset, mapping = self.analysis
+        labels, mapped, target = merge_groups(labels, mapped, selected)
+        mapping = {original: target if current in selected else current
+                   for original, current in mapping.items()}
+        self.processing_screen()
+        self.merging = True
+        self.status.configure(text='Merging selected groups…')
+
+        def work():
+            try:
+                output = merge_results(self.output, selected, info,
+                                       lambda p, s: self.events.put(('progress', (p, s))), self.cancel)
+                self.events.put(('done', (output, (labels, mapped, info, rate, offset, mapping), target)))
+            except Exception as error:
+                self.events.put(('error', str(error)))
+        self.worker = threading.Thread(target=work, daemon=False)
+        self.worker.start()
 
     def stop_preview(self):
         self.playing = False
@@ -296,7 +398,10 @@ class App(TkinterDnD.Tk):
         self.selected = group
         for gid, button in self.group_buttons.items():
             button.configure(fg_color=LIGHT if gid == group['group_id'] else WHITE)
-        self.group_title.configure(text=f'Group {group["group_id"]}')
+        self.group_title.configure(text=group_heading(group))
+        self.name_entry.delete(0, 'end')
+        self.name_entry.insert(0, group.get('group_name', ''))
+        self.name_hint.configure(text='Optional researcher label · Blank restores the group ID.')
         self.details.configure(text=f'{int(group["frame_count"]):,} frames · {float(group["duration_seconds"]):.1f} seconds')
         self.play_button.configure(text='Play')
         self.frame_count = int(group['frame_count'])
@@ -312,7 +417,10 @@ class App(TkinterDnD.Tk):
         self.cap = cv2.VideoCapture(str(self.output / f'group_{group["group_id"]}.mp4'))
         self.preview_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
         self.update_idletasks()
-        self.show_frame()
+        if not self.show_frame():
+            self.stop_preview()
+            self.play_button.configure(state='disabled')
+            self.preview.configure(image='', text='Could not read this group video. Check that the output file is available.', fg=MUTED)
 
     def show_frame(self):
         if self.cap is None:
@@ -328,6 +436,8 @@ class App(TkinterDnD.Tk):
         return True
 
     def toggle(self):
+        if self.cap is None:
+            return
         self.playing = not self.playing
         self.play_button.configure(text='Pause' if self.playing else 'Play')
         if self.playing:
@@ -357,8 +467,11 @@ class App(TkinterDnD.Tk):
 
     def export(self):
         source = self.output / f'group_{self.selected["group_id"]}.mp4'
-        target = filedialog.asksaveasfilename(parent=self, initialfile=source.name, defaultextension='.mp4', filetypes=[('MP4 video', '*.mp4')])
+        target = filedialog.asksaveasfilename(parent=self, initialfile=group_export_filename(self.selected), defaultextension='.mp4', **dialog_filters([('MP4 video', '*.mp4')]))
         if target and Path(target).resolve() != source.resolve():
+            if Path(target).resolve().parent == self.output.resolve():
+                messagebox.showerror('Could not export', 'Choose a location outside this results folder to preserve its group videos.', parent=self)
+                return
             try:
                 shutil.copy2(source, target)
             except OSError as error:
@@ -378,6 +491,9 @@ class App(TkinterDnD.Tk):
         self.upload()
 
     def close(self):
+        if self.closed:
+            return
+        self.closing = True
         self.cancel.set()
         self.stop_preview()
         if self.worker and self.worker.is_alive():

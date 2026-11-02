@@ -7,16 +7,17 @@ Small desktop tool that takes a behavior video and its B-SOiD labels and makes o
 ## Running it
 
 - **Windows:** double-click `start_boute_windows.bat`. If Python is missing, it offers to install it through winget.
-- **macOS:** open `start_boute_mac.command`. If macOS blocks it, right-click and choose Open. You'll need Python 3.10+ from python.org.
+- **macOS:** open `start_boute_mac.command`. If macOS blocks it, right-click and choose Open. You'll need Python 3.10+ from python.org. Open and save dialogs intentionally show all files to avoid a native Tk file-filter crash on some Macs, including the Anaconda setup reported by a user. Boute still validates video/CSV selections and defaults exports to MP4; no manual code patch is needed.
 - **Linux:** run `start_boute_linux.sh` from a terminal. You need Python 3.10+, Tk, venv, and a desktop session. On Debian/Ubuntu that's `python3 python3-tk python3-venv`, and possibly `libgl1` for OpenCV.
 
 The first launch makes a `.venv` in the project folder and installs dependencies, so you need internet once. After that it works offline.
 
 ## Using it
 
-1. Choose the original video and the B-SOiD results CSV. The CSV is the one with `labels_pose` in the filename (the `bout_lengths` and `transitions_mat` files aren't needed). If you renamed it, switch the picker to "All CSV files". You can also drag both files in at once (experimental).
+1. Choose the original video and the B-SOiD results CSV. The CSV is the one with `labels_pose` in the filename (the `bout_lengths` and `transitions_mat` files aren't needed). If you renamed it, switch the picker to "All CSV files". You can also drag both files in at once (experimental). If the native drag-and-drop library cannot load on your system, file pickers remain available.
 2. Hit **Continue**. If Boute can't figure out the label rate or timing on its own, it will ask for the label samples per second and where the video starts within the label timeline.
-3. Pick a group, play it, scrub, change speed, or export an MP4.
+3. Pick a group, play it, scrub, change speed, or export an MP4. Enter an optional behavior name (for example, “grooming?”) and click **Save name** or press Enter. Names appear in the viewer and sidebar, are saved in `group_summary.csv`, and are included in suggested export filenames. Clear the entry and save to restore the group ID as its display name. Renaming does not regenerate videos.
+4. To combine behaviors, check two or more groups in the sidebar and click **Merge selected**. The combined group keeps the lowest selected ID and plays its frames in original video order. You can merge it again with other groups. Group names carry forward; a combined group keeps the lowest selected ID’s name, which you can edit after merging. Each merge creates a new run folder with updated MP4s, frame manifest, summary, and `group_mapping.csv` tracing original IDs to merged IDs. Only the selected group videos are decoded and combined, in source-frame order; other group videos are copied without re-encoding. The original recording is not reopened. Merging re-encodes the selected videos, so repeated merges may slightly reduce image quality. Earlier run folders and the input CSV stay unchanged.
 
 Orange ticks above the scrubber mark gaps in the original video frames. Hover for the source frame numbers and how many frames were skipped, or click to jump past the gap.
 
@@ -28,7 +29,7 @@ Each run folder has:
 
 - `group_<ID>.mp4` for each group that shows up in the video
 - `frame_manifest.csv` with group, original frame index, timestamp, and output frame index (all zero-based)
-- `group_summary.csv` with frame counts, percent of video, and montage duration
+- `group_summary.csv` with group IDs, researcher names, frame counts, percent of video, and montage duration
 - `source_metadata.txt` with input paths, rates, offset, and the mapping rule used
 - `source_csvs/` with a copy of your results CSV
 

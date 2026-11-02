@@ -24,7 +24,7 @@ def read_jumps(manifest: Path) -> dict[str, list[FrameJump]]:
     """Find gaps between successive source frames within each montage."""
     jumps: dict[str, list[FrameJump]] = {}
     previous: dict[str, int] = {}
-    with manifest.open(newline='') as stream:
+    with manifest.open(encoding='utf-8', newline='') as stream:
         for row in csv.DictReader(stream):
             group = row['group_id']
             source = int(row['original_video_frame'])
