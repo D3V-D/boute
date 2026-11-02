@@ -1,8 +1,8 @@
 """Descriptive cross-group contrasts and reliability-gated pose similarity.
 
 Groups, rather than their durations, receive equal weight in comparisons.
-Scores describe the observed recording; they are not probabilities or tests of
-statistical significance. Correlated landmarks do not constitute replication.
+Contrast and similarity scores are descriptive. Bout-level significance is
+reported separately; correlated landmarks do not constitute replication.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import math
 import numpy as np
 
 from .core import InputError
+from .statistics import mean_sd, balanced_mean_sd, permutation_test, fdr_by, MIN_BOUTS, STATISTICAL_METHOD
 
 
 class GroupComparisons:
@@ -22,6 +23,13 @@ class GroupComparisons:
         self.cancel = cancel
         self.features = []
         self.candidates = []
+        self.statistics = []
+        self.bouts = [[] for _ in self.ids]
+        if len(self.groups):
+            starts = np.r_[0, np.flatnonzero(~continuity) + 1]
+            ends = np.r_[starts[1:], len(self.groups)]
+            for start, end in zip(starts, ends):
+                self.bouts[self.ids.index(int(self.groups[start]))].append(np.arange(start, end))
 
     def add(self, key, family, subject, kind, values, usable, observation_valid,
             unit, resolution, motion=True):
@@ -42,6 +50,39 @@ class GroupComparisons:
         medians = np.asarray(medians)
         self.features.append(dict(key=key, family=family, values=medians, resolution=resolution))
         current = samples[self.target]
+        others = [i for i in range(len(self.ids)) if i != self.target and len(samples[i])]
+        bouts = []
+        eligible_statistics = bool(len(current) and others)
+        for group_index, runs in enumerate(self.bouts):
+            medians_for_group = []
+            if not eligible_statistics or not len(samples[group_index]):
+                bouts.append(np.empty(0))
+                continue
+            for run in runs:
+                positions = run[:-1] if motion else run
+                if not len(positions) or observation_valid[run].mean() < .5:
+                    continue
+                good = usable[positions] & np.isfinite(values[positions])
+                if good.sum() >= max(3, math.ceil(len(positions) * .5)):
+                    medians_for_group.append(float(np.median(values[positions][good])))
+            bouts.append(np.asarray(medians_for_group))
+        current_mean, current_sd = mean_sd(current)
+        rest_mean, rest_sd = balanced_mean_sd([samples[i] for i in others])
+        current_bout_mean, current_bout_sd = mean_sd(bouts[self.target])
+        rest_bout_mean, rest_bout_sd = balanced_mean_sd([bouts[i] for i in others])
+        statistic = dict(feature=key, subject=subject, unit=unit,
+                         group_mean=current_mean, group_sd=current_sd, other_groups_mean=rest_mean, other_groups_sd=rest_sd,
+                         group_bout_mean=current_bout_mean, group_bout_sd=current_bout_sd,
+                         other_groups_bout_mean=rest_bout_mean, other_groups_bout_sd=rest_bout_sd,
+                         group_bouts=len(bouts[self.target]) if eligible_statistics else None,
+                         comparison_bouts=sum(len(bouts[i]) for i in others) if eligible_statistics else None,
+                         p_value=None, q_value=None, significant=None, bout_effect=None, permutations=0, exact_test=False,
+                         test_status='Too few bouts' if eligible_statistics else 'No comparison data' if not others else 'Insufficient tracking')
+        if (len(current) and others and len(bouts[self.target]) >= MIN_BOUTS and
+                all(len(bouts[i]) for i in others) and sum(len(bouts[i]) for i in others) >= MIN_BOUTS):
+            statistic.update(permutation_test(bouts[self.target], [bouts[i] for i in others], cancel=self.cancel))
+            statistic['test_status'] = 'Exploratory bout permutation'
+        self.statistics.append(statistic)
         others = [i for i in range(len(self.ids)) if i != self.target and len(samples[i])]
         if not len(current) or not others:
             return
@@ -106,6 +147,11 @@ class GroupComparisons:
                                     comparison_groups=len(others), sample_kind='motion pairs' if motion else 'observations'))
 
     def finish(self):
+        tested = [row for row in self.statistics if row['p_value'] is not None]
+        for row, q in zip(tested, fdr_by([row['p_value'] for row in tested])):
+            row['q_value'] = float(q)
+            row['significant'] = bool(q <= .05)
+        statistics = {row['feature']: row for row in self.statistics}
         selected, used_subjects, used_categories = [], set(), set()
         candidates = sorted(self.candidates, key=lambda item: (-item['strength'], item['feature']))
         # Prefer different findings, then fill remaining places without repeating
@@ -118,7 +164,10 @@ class GroupComparisons:
                     continue
                 if diverse and candidate['category'] in used_categories:
                     continue
-                selected.append(candidate)
+                item = dict(candidate, **{key: value for key, value in statistics[candidate['feature']].items() if key not in ('feature', 'subject', 'unit')})
+                item['direction_consistent'] = None if item['bout_effect'] is None else bool(item['bout_effect'] * (item['group_value'] - item['other_groups_value']) > 0)
+                item['supports_insight'] = bool(item['significant'] and item['direction_consistent'])
+                selected.append(item)
                 used_subjects.add(candidate['subject'])
                 used_categories.add(candidate['category'])
         similarities = []
@@ -152,7 +201,8 @@ class GroupComparisons:
         similarities.sort(key=lambda item: (item['distance'], item['group_id']))
         for rank, row in enumerate(similarities, 1):
             row['rank'] = rank
-        return dict(insights=selected, similarities=similarities,
+        return dict(insights=selected, similarities=similarities, feature_statistics=self.statistics,
+                    statistical_method=STATISTICAL_METHOD, tested_features=len(tested),
                     insight_status=('No clear differences met the coverage and contrast requirements at this confidence threshold.' if not selected and len(self.ids) > 1
                                     else 'No other groups are available for comparison.' if not selected else ''),
                     similarity_status=('No other groups are available for comparison.' if len(self.ids) < 2 else 'Not enough shared reliable features to rank other groups.') if not similarities else '')

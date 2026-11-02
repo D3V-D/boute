@@ -232,8 +232,15 @@ class PoseTests(unittest.TestCase):
         output = export_report(self.root, report, 'Stable cluster')
         self.assertTrue((output / 'insights.csv').exists())
         self.assertTrue((output / 'similarities.csv').exists())
+        self.assertTrue((output / 'feature_statistics.csv').exists())
+        with (output / 'feature_statistics.csv').open() as stream:
+            feature = next(csv.DictReader(stream))
+        self.assertIn('group_sd', feature)
+        self.assertIn('group_bout_mean', feature)
+        self.assertIn('q_value', feature)
         settings = json.loads((output / 'analysis_settings.json').read_text())
         self.assertIn('Distance=sqrt', settings['comparison_method'])
+        self.assertIn('Benjamini', settings['statistical_method'])
         with (output / 'similarities.csv').open() as stream:
             row = next(csv.DictReader(stream))
         self.assertIn('distance', row)

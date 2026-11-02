@@ -21,6 +21,34 @@ def number(value, suffix=''):
     return '—' if value is None or not math.isfinite(value) else f'{value:.2f}{suffix}'
 
 
+def p_number(value):
+    if value is None:
+        return '—'
+    return f'{value:.2g}' if value < .01 else f'{value:.3f}'
+
+
+METHODS_TEXT = """Numbers
+
+Cards show the median and sample standard deviation (SD) separately. SD describes spread, not uncertainty in the median. The comparison SD gives each group equal weight. Units are image pixels and seconds, or degrees. Confidence, smoothing, reference, and axis are set in Settings.
+
+Significance
+
+Each continuous bout contributes one median. A bout needs three valid measurements and 50% valid coverage. A test needs five bouts in this group and five in the comparison data. Missing tracking never creates extra bouts.
+
+p: a two-sided bout-label permutation test of the difference in mean bout medians, with equal weight per comparison group. It uses all exact allocations when feasible, otherwise 9,999 reproducible random permutations. q: Benjamini–Yekutieli FDR correction across all tested features for this group and settings, including features not shown. Green indicates q ≤ 0.05 with a bout effect in the same direction as the displayed median difference. If the bout result reverses direction, the card says so. “Too few bouts” means no test was run.
+
+These are exploratory associations within one recording. Bouts can remain dependent, and clusters were selected from these same pose data. Independent animals or recordings are needed for confirmatory biological inference. Trying other settings or groups adds tests beyond this correction.
+
+Similarity
+
+Lower distance is closer. Group medians are scaled by across-group IQR, with equal weight for motion, posture, relationships, and the selected joint angle. Features shows shared / available measurements. Missing data is excluded; at least three shared features and 50% coverage are required.
+
+Pose and exports
+
+Use matching recordings, image dimensions, and crop. Motion follows the original timeline and excludes group boundaries and missing observations. Slower pose samples are counted once. Export tables includes full methods, SDs, raw p-values, corrected q-values, and all feature tests. Annotated MP4 exports only the selected dots and names.
+"""
+
+
 class PoseViewerMixin:
     def start_background(self, action):
         self.background_jobs = [job for job in self.background_jobs if job.is_alive()]
@@ -39,116 +67,120 @@ class PoseViewerMixin:
             except (OSError, ValueError, KeyError) as error:
                 self.pose_data = None
                 self.pose_message = f'Pose data unavailable: {error}'
-        pane = ctk.CTkScrollableFrame(parent, width=355, fg_color=BG, corner_radius=0)
+        pane = ctk.CTkFrame(parent, fg_color=BG, corner_radius=0)
         pane.pack(fill='both', expand=True, padx=12, pady=12)
-        ctk.CTkLabel(pane, text='Movement insights', text_color=INK, font=('Arial', 19, 'bold'), anchor='w').pack(fill='x')
-        ctk.CTkLabel(pane, text='Evidence for your next annotation', text_color=MUTED, font=('Arial', 12), anchor='w').pack(fill='x', pady=(0, 12))
-        self.pose_status = ctk.CTkLabel(pane, text='', wraplength=320, justify='left', text_color=MUTED, anchor='w')
-        self.pose_status.pack(fill='x', pady=(0, 8))
-        insight_card = ctk.CTkFrame(pane, fg_color=SOFT, corner_radius=8, border_width=1, border_color=BORDER)
-        insight_card.pack(fill='x', pady=(0, 12))
-        ctk.CTkLabel(insight_card, text='Insights for this group', text_color=INK,
-                     font=('Arial', 15, 'bold'), anchor='w').pack(fill='x', padx=12, pady=(12, 6))
-        self.group_insights_text = ctk.CTkLabel(insight_card, text='Load pose data to find distinctive movement, stability, and relationships.',
-                                               wraplength=285, justify='left', anchor='w', text_color=INK, font=('Arial', 12))
-        self.group_insights_text.pack(fill='x', padx=12, pady=(0, 10))
-        ctk.CTkLabel(insight_card, text='Compared with equally weighted groups in this recording. Descriptive differences, not behavior labels.',
-                     wraplength=285, justify='left', text_color=MUTED, font=('Arial', 10)).pack(fill='x', padx=12, pady=(0, 12))
-        ctk.CTkLabel(pane, text='Similar groups', text_color=INK, font=('Arial', 15, 'bold'), anchor='w').pack(fill='x')
-        self.similarity_note = ctk.CTkLabel(pane, text='Load pose data to compare groups.', wraplength=310,
-                                           justify='left', text_color=MUTED, font=('Arial', 10), anchor='w')
-        self.similarity_note.pack(fill='x', pady=(2, 8))
-        self.similarity_table = self.pose_table(pane, [('rank', '#', 30), ('group', 'Group', 110),
-                                                     ('distance', 'Dist. ↓', 72), ('score', 'Score', 65),
-                                                     ('shared', 'Shared features', 105)], height=4)
+        heading = ctk.CTkFrame(pane, fg_color='transparent')
+        heading.pack(fill='x', pady=(0, 4))
+        self.button(heading, 'Load pose', self.import_pose, width=88).pack(side='left')
+        self.button(heading, 'Methods', self.show_analysis_methods, width=80).pack(side='right')
+        self.pose_status = ctk.CTkLabel(pane, text='', wraplength=310, justify='left', text_color=MUTED,
+                                       anchor='w', font=('Arial', 11))
+        self.pose_status.pack(fill='x', pady=(0, 6))
+        tabs = ctk.CTkTabview(pane, fg_color=BG, segmented_button_fg_color=SOFT,
+                             segmented_button_selected_color=BG, segmented_button_selected_hover_color=BG,
+                             segmented_button_unselected_color=SOFT, text_color=INK, text_color_disabled=MUTED,
+                             corner_radius=6, border_width=0)
+        tabs.pack(fill='both', expand=True)
+        for title in ('Insights', 'Data', 'Settings'):
+            tabs.add(title)
+        self.pose_tabs = tabs
+        insight_pane = ctk.CTkScrollableFrame(tabs.tab('Insights'), fg_color=BG, corner_radius=0)
+        insight_pane.pack(fill='both', expand=True)
+        ctk.CTkLabel(insight_pane, text='Insights for this group', text_color=INK,
+                     font=('Arial', 15, 'bold'), anchor='w').pack(fill='x', pady=(4, 10))
+        self.group_insights_text = ctk.CTkLabel(insight_pane, text='Load a pose CSV to begin.',
+                                               wraplength=280, justify='left', anchor='w', text_color=MUTED, font=('Arial', 12))
+        self.group_insights_text.pack(fill='x', pady=(0, 10))
+        self.insight_cards = ctk.CTkFrame(insight_pane, fg_color='transparent')
+        self.insight_cards.pack(fill='x')
+        ctk.CTkLabel(insight_pane, text='Similar groups', text_color=INK,
+                     font=('Arial', 15, 'bold'), anchor='w').pack(fill='x', pady=(18, 4))
+        self.similarity_note = ctk.CTkLabel(insight_pane, text='', wraplength=280, justify='left',
+                                           text_color=MUTED, font=('Arial', 10), anchor='w')
+        self.similarity_note.pack(fill='x', pady=(0, 6))
+        self.similarity_table = self.pose_table(insight_pane, [('rank', '#', 26), ('group', 'Group', 110),
+                                                             ('distance', 'Distance ↓', 85), ('shared', 'Features', 75)], height=5)
         self.similarity_table.bind('<<TreeviewSelect>>', self.similarity_selected)
-        ctk.CTkLabel(pane, text='Lower distance = more similar. Families receive equal weight; features are scaled by across-group IQR. Score = 100 / (1 + distance), not a probability. Select a row to inspect that group.',
-                     wraplength=310, justify='left', text_color=MUTED, font=('Arial', 10)).pack(fill='x', pady=(4, 12))
-        self.button(pane, 'Load / replace pose CSV', self.import_pose).pack(fill='x', pady=(0, 12))
+        footer = ctk.CTkFrame(pane, fg_color='transparent')
+        footer.pack(fill='x', pady=(10, 0))
+        self.report_button = self.button(footer, 'Export tables', self.save_pose_report, width=142)
+        self.report_button.configure(state='disabled')
+        self.report_button.pack(side='left', fill='x', expand=True, padx=(0, 4))
+        self.overlay_export_button = self.button(footer, 'Annotated MP4', self.save_pose_overlay, width=142)
+        self.overlay_export_button.configure(state='disabled')
+        self.overlay_export_button.pack(side='left', fill='x', expand=True, padx=(4, 0))
         if self.pose_data is None:
-            self.pose_status.configure(text=self.pose_message or 'No pose data yet. Use a DLC CSV with body-part x, y, and likelihood columns. Combined labels_pose files are loaded automatically.')
+            tabs.delete('Data')
+            tabs.delete('Settings')
+            self.pose_status.configure(text=self.pose_message or 'No pose data')
             return
         pose = self.pose_data
         if len(pose.xy) != self.analysis[2].frames:
             self.pose_data = None
-            self.pose_status.configure(text='Pose frame count does not match the video. Load the pose CSV again to align it.')
+            tabs.delete('Data')
+            tabs.delete('Settings')
+            self.pose_status.configure(text='Frame count mismatch. Load the pose CSV again.')
             return
-        self.pose_status.configure(text=f'{len(pose.names)} landmarks · {len(pose.xy):,} aligned frames\nConfidence-gated · No interpolation')
+        self.pose_status.configure(text=f'{len(pose.names)} landmarks · {len(pose.xy):,} frames')
+        self.overlay_export_button.configure(state='disabled' if self.pose_exporting else 'normal')
+        data_pane = ctk.CTkScrollableFrame(tabs.tab('Data'), fg_color=BG, corner_radius=0)
+        data_pane.pack(fill='both', expand=True)
+        ctk.CTkLabel(data_pane, text='Body parts', anchor='w', text_color=INK, font=('Arial', 14, 'bold')).pack(fill='x', pady=(4, 8))
+        self.parts_table = self.pose_table(data_pane, [('part', 'Landmark', 135), ('camera', 'Image px/s', 85),
+                                                     ('body', 'Body px/s', 85), ('coverage', 'Valid %', 70),
+                                                     ('ratio', 'Body vs rest', 90), ('range', 'Body range px', 100),
+                                                     ('pairs', 'Body pairs', 85)], height=8)
+        ctk.CTkLabel(data_pane, text='Relationships', anchor='w', text_color=INK, font=('Arial', 14, 'bold')).pack(fill='x', pady=(18, 8))
+        self.pairs_table = self.pose_table(data_pane, [('pair', 'Landmark pair', 205), ('change', 'Change px/s', 100),
+                                                     ('range', 'Range px', 80), ('pairs', 'Valid pairs', 85)], height=7)
+        ctk.CTkLabel(data_pane, text='Joint angle', anchor='w', text_color=INK, font=('Arial', 14, 'bold')).pack(fill='x', pady=(18, 4))
+        self.angle_text = ctk.CTkLabel(data_pane, text='—', wraplength=280, justify='left', text_color=MUTED, font=('Arial', 11))
+        self.angle_text.pack(fill='x')
+        settings = ctk.CTkScrollableFrame(tabs.tab('Settings'), fg_color=BG, corner_radius=0)
+        settings.pack(fill='both', expand=True)
         prefs = self.pose_preferences
         self.show_dots = tk.BooleanVar(value=prefs.get('dots', False))
         self.show_part_labels = tk.BooleanVar(value=prefs.get('labels', False))
-        switches = ctk.CTkFrame(pane, fg_color=SOFT, corner_radius=8)
-        switches.pack(fill='x', pady=(0, 10))
-        ctk.CTkSwitch(switches, text='Show dots', variable=self.show_dots, command=self.overlay_changed,
-                       progress_color=INK, font=('Arial', 12)).pack(anchor='w', padx=12, pady=(12, 8))
-        ctk.CTkCheckBox(switches, text='Show landmark names', variable=self.show_part_labels,
-                       command=self.overlay_changed, fg_color=INK, checkbox_width=16, checkbox_height=16,
-                       font=('Arial', 12)).pack(anchor='w', padx=12, pady=(0, 12))
-        confidence_row = ctk.CTkFrame(pane, fg_color='transparent')
+        ctk.CTkLabel(settings, text='Overlay', anchor='w', text_color=INK, font=('Arial', 14, 'bold')).pack(fill='x', pady=(4, 8))
+        ctk.CTkSwitch(settings, text='Show dots', variable=self.show_dots, command=self.overlay_changed,
+                       progress_color=INK, font=('Arial', 12)).pack(anchor='w', pady=(0, 10))
+        ctk.CTkCheckBox(settings, text='Landmark names', variable=self.show_part_labels, command=self.overlay_changed,
+                       fg_color=INK, checkbox_width=16, checkbox_height=16, font=('Arial', 12)).pack(anchor='w', pady=(0, 10))
+        self.part_options = {}
+        chooser = ctk.CTkScrollableFrame(settings, height=100, fg_color=SOFT, corner_radius=6)
+        chooser.pack(fill='x', pady=(0, 16))
+        for name in pose.names:
+            variable = tk.BooleanVar(value=name in prefs.get('parts', pose.names))
+            self.part_options[name] = variable
+            ctk.CTkCheckBox(chooser, text=name, variable=variable, command=self.overlay_changed,
+                            fg_color=INK, checkbox_width=15, checkbox_height=15, font=('Arial', 11)).pack(anchor='w', padx=4, pady=3)
+        ctk.CTkLabel(settings, text='Analysis', anchor='w', text_color=INK, font=('Arial', 14, 'bold')).pack(fill='x', pady=(0, 8))
+        confidence_row = ctk.CTkFrame(settings, fg_color='transparent')
         confidence_row.pack(fill='x')
         self.confidence_label = ctk.CTkLabel(confidence_row, text='Confidence', text_color=INK)
         self.confidence_label.pack(side='left')
         self.pose_threshold = tk.DoubleVar(value=prefs.get('threshold', .8))
         self.confidence_value = ctk.CTkLabel(confidence_row, text=f'{self.pose_threshold.get():.2f}', text_color=MUTED)
         self.confidence_value.pack(side='right')
-        ctk.CTkSlider(pane, from_=0, to=1, number_of_steps=100, variable=self.pose_threshold,
+        ctk.CTkSlider(settings, from_=0, to=1, number_of_steps=100, variable=self.pose_threshold,
                       command=lambda value: self.pose_settings_changed(), button_color=INK,
                       progress_color=INK, fg_color=BORDER).pack(fill='x', pady=(0, 10))
-        self.part_options = {}
-        chooser = ctk.CTkScrollableFrame(pane, height=100, fg_color=SOFT, corner_radius=8)
-        chooser.pack(fill='x', pady=(0, 10))
-        for name in pose.names:
-            variable = tk.BooleanVar(value=name in prefs.get('parts', pose.names))
-            self.part_options[name] = variable
-            ctk.CTkCheckBox(chooser, text=name, variable=variable, command=self.overlay_changed,
-                            fg_color=INK, checkbox_width=15, checkbox_height=15, font=('Arial', 11)).pack(anchor='w', padx=4, pady=3)
-        ctk.CTkLabel(pane, text='Body reference', anchor='w', text_color=INK).pack(fill='x')
+        ctk.CTkLabel(settings, text='Body reference', anchor='w', text_color=INK).pack(fill='x')
         reference = prefs.get('reference')
         if reference not in pose.names:
             usable = np.isfinite(pose.confidence) & (pose.confidence >= .8) & (pose.confidence <= 1)
             reference = pose.names[int(usable.sum(axis=0).argmax())]
-        self.reference_menu = self.pose_menu(pane, list(pose.names), reference)
-        ctk.CTkLabel(pane, text='Body axis (optional rotation correction)', anchor='w', text_color=MUTED, font=('Arial', 11)).pack(fill='x')
-        self.axis_menu = self.pose_menu(pane, ['Translation only', *pose.names], prefs.get('axis', 'Translation only'))
-        ctk.CTkLabel(pane, text='Median smoothing (unique pose observations)', anchor='w', text_color=MUTED, font=('Arial', 11)).pack(fill='x')
-        self.smoothing_menu = self.pose_menu(pane, ['Off', '3 samples', '5 samples'], prefs.get('smoothing', '3 samples'))
-        self.button(pane, 'Update analysis', self.request_pose_analysis, primary=True).pack(fill='x', pady=(4, 12))
-        tabs = ctk.CTkTabview(pane, height=470, fg_color=SOFT, segmented_button_fg_color=SOFT,
-                             segmented_button_selected_color=BG, segmented_button_selected_hover_color=BG,
-                             segmented_button_unselected_color=SOFT, text_color=INK, corner_radius=8)
-        tabs.pack(fill='x')
-        for title in ('Summary', 'Parts', 'Relations'):
-            tabs.add(title)
-        self.insight_text = ctk.CTkLabel(tabs.tab('Summary'), text='Select a group to analyze.', wraplength=285,
-                                        justify='left', text_color=INK, anchor='nw', font=('Arial', 13))
-        self.insight_text.pack(fill='x', padx=8, pady=12)
-        self.motion_chart = tk.Canvas(tabs.tab('Summary'), bg=SOFT, height=200, highlightthickness=0)
-        self.motion_chart.pack(fill='x', padx=8)
-        ctk.CTkLabel(tabs.tab('Summary'), text='2D pixels / second · Rankings require ≥50% valid observations and ≥25% of eligible body-motion pairs (minimum 3). Descriptive hints, not behavior diagnoses.',
-                     wraplength=285, justify='left', text_color=MUTED, font=('Arial', 11)).pack(fill='x', padx=8, pady=12)
-        self.parts_table = self.pose_table(tabs.tab('Parts'), [('part', 'Landmark', 135), ('camera', 'Image px/s', 85),
-                                                             ('body', 'Body px/s', 85), ('coverage', 'Valid %', 70),
-                                                             ('ratio', 'Body vs rest', 90), ('range', 'Body range px', 100),
-                                                             ('pairs', 'Body pairs', 85)])
-        ctk.CTkLabel(tabs.tab('Parts'), text='Body speed removes reference motion; an axis also removes rotation. “vs rest” compares this landmark with other groups. — means insufficient data.',
-                     wraplength=285, justify='left', text_color=MUTED, font=('Arial', 11)).pack(fill='x', pady=8)
-        self.pairs_table = self.pose_table(tabs.tab('Relations'), [('pair', 'Landmark pair', 205), ('change', 'Change px/s', 100),
-                                                                 ('range', 'Range px', 80), ('pairs', 'Valid pairs', 85)], height=5)
-        ctk.CTkLabel(tabs.tab('Relations'), text='Joint angle: A → vertex → C', anchor='w', text_color=INK).pack(fill='x', pady=(10, 0))
+        self.reference_menu = self.pose_menu(settings, list(pose.names), reference)
+        ctk.CTkLabel(settings, text='Body axis', anchor='w', text_color=INK).pack(fill='x')
+        self.axis_menu = self.pose_menu(settings, ['Translation only', *pose.names], prefs.get('axis', 'Translation only'))
+        ctk.CTkLabel(settings, text='Smoothing', anchor='w', text_color=INK).pack(fill='x')
+        self.smoothing_menu = self.pose_menu(settings, ['Off', '3 samples', '5 samples'], prefs.get('smoothing', '3 samples'))
+        ctk.CTkLabel(settings, text='Joint angle', anchor='w', text_color=INK).pack(fill='x', pady=(8, 0))
         self.angle_menus = []
-        for i in range(3):
-            self.angle_menus.append(self.pose_menu(tabs.tab('Relations'), list(pose.names), prefs.get(f'angle{i}', pose.names[min(i, len(pose.names)-1)])))
-        self.angle_text = ctk.CTkLabel(tabs.tab('Relations'), text='Choose three distinct points, then update.', wraplength=285,
-                                      justify='left', text_color=MUTED, font=('Arial', 11))
-        self.angle_text.pack(fill='x', pady=8)
-        self.report_button = self.button(pane, 'Export analysis tables', self.save_pose_report)
-        self.report_button.configure(state='disabled')
-        self.report_button.pack(fill='x', pady=(14, 6))
-        self.overlay_export_button = self.button(pane, 'Export MP4 with dots', self.save_pose_overlay)
-        self.overlay_export_button.configure(state='disabled' if self.pose_exporting else 'normal')
-        self.overlay_export_button.pack(fill='x')
-        ctk.CTkLabel(pane, text='Overlays use original image coordinates. Cropped / resized pose data must be converted before import. Exported tables include confidence, sample counts, and analysis settings.',
-                     wraplength=320, justify='left', text_color=MUTED, font=('Arial', 11)).pack(fill='x', pady=10)
+        for i, label in enumerate(('A', 'Vertex', 'C')):
+            ctk.CTkLabel(settings, text=label, anchor='w', text_color=MUTED, font=('Arial', 10)).pack(fill='x')
+            self.angle_menus.append(self.pose_menu(settings, list(pose.names), prefs.get(f'angle{i}', pose.names[min(i, len(pose.names)-1)])))
+        self.button(settings, 'Apply settings', self.request_pose_analysis, primary=True).pack(fill='x', pady=(8, 12))
 
     def pose_menu(self, parent, values, value):
         menu = ctk.CTkOptionMenu(parent, values=values, command=lambda value: self.pose_settings_changed(),
@@ -193,15 +225,15 @@ class PoseViewerMixin:
         if hasattr(self, 'report_button'):
             self.report_button.configure(state='disabled')
         self.confidence_value.configure(text=f'{self.pose_threshold.get():.2f}')
-        self.pose_status.configure(text='Settings changed · Update analysis to refresh measurements.')
-        self.clear_group_comparisons('Settings changed. Update analysis to compare this group again.')
+        self.pose_status.configure(text='Settings changed')
+        self.clear_group_comparisons('Apply settings to refresh.')
         self.overlay_changed()
 
     def selected_pose_parts(self):
         return [i for i, name in enumerate(self.pose_data.names) if self.part_options[name].get()]
 
     def prepare_group_pose(self):
-        self.clear_group_comparisons('Comparing this group with the rest of the recording…' if self.pose_data is not None else 'Load pose data to find distinctive movement, stability, and relationships.')
+        self.clear_group_comparisons('Analyzing…' if self.pose_data is not None else 'Load a pose CSV to begin.')
         self.pose_report = None
         self.pose_cancel.set()
         self.pose_request += 1
@@ -235,9 +267,9 @@ class PoseViewerMixin:
             self.pose_status.configure(text=str(error))
             return
         self.remember_pose_preferences()
-        self.clear_group_comparisons('Comparing this group with the rest of the recording…')
+        self.clear_group_comparisons('Analyzing…')
         pose, groups, info = self.pose_data, self.analysis[1], self.analysis[2]
-        self.pose_status.configure(text='Analyzing continuous source segments…')
+        self.pose_status.configure(text='Analyzing…')
         def work():
             try:
                 report = analyze_pose(pose, groups, info, gid, threshold, reference, axis, smoothing, angle, cancel)
@@ -255,7 +287,7 @@ class PoseViewerMixin:
                 return
             if error:
                 self.pose_status.configure(text=error)
-                self.clear_group_comparisons('Comparison unavailable. Check the analysis settings.')
+                self.clear_group_comparisons('Check analysis settings.')
             else:
                 self.pose_report = report
                 self.show_pose_report(report)
@@ -265,7 +297,7 @@ class PoseViewerMixin:
                 return
             if error:
                 self.pose_status.configure(text=error)
-                self.clear_group_comparisons('Comparison unavailable. Check the analysis settings.')
+                self.clear_group_comparisons('Check analysis settings.')
             else:
                 self.pose_alignment_dialog(pose)
         elif kind == 'pose_exported':
@@ -276,26 +308,64 @@ class PoseViewerMixin:
             messagebox.showerror('Export failed', error, parent=self) if error else messagebox.showinfo('Export complete', f'Saved to:\n{path}', parent=self)
 
     def clear_group_comparisons(self, message):
+        for child in self.insight_cards.winfo_children():
+            child.destroy()
         self.group_insights_text.configure(text=message)
-        self.similarity_note.configure(text='Comparison pending.' if self.pose_data is not None else 'Pose data is required for similarity.')
+        self.group_insights_text.pack(fill='x', pady=(0, 10), before=self.insight_cards)
+        self.similarity_note.configure(text='')
         self.similarity_table.delete(*self.similarity_table.get_children())
 
     def show_group_comparisons(self, report):
-        descriptions = []
+        for child in self.insight_cards.winfo_children():
+            child.destroy()
+        if report['insights']:
+            self.group_insights_text.pack_forget()
+        else:
+            self.group_insights_text.configure(text=report['insight_status'])
         for item in report['insights']:
-            evidence = (f'{item["valid_samples"]:,} valid {item["sample_kind"]} · '
-                        f'{item["coverage_percent"]:.0f}% coverage · {item["comparison_groups"]} comparison groups')
-            descriptions.append(f'{item["title"]}\n{item["description"]}\n{evidence}')
-        self.group_insights_text.configure(text='\n\n'.join(descriptions) if descriptions else report['insight_status'])
+            card = ctk.CTkFrame(self.insight_cards, fg_color=BG, border_color=BORDER, border_width=1, corner_radius=8)
+            card.pack(fill='x', pady=(0, 10))
+            ctk.CTkLabel(card, text=item['title'], text_color=INK, font=('Arial', 12, 'bold'),
+                         wraplength=265, justify='left', anchor='w').pack(fill='x', padx=12, pady=(10, 6))
+            values = ctk.CTkFrame(card, fg_color='transparent')
+            values.pack(fill='x', padx=12)
+            for title, median, sd in (('This group', item['group_value'], item['group_sd']),
+                                      ('Other groups', item['other_groups_value'], item['other_groups_sd'])):
+                column = ctk.CTkFrame(values, fg_color='transparent')
+                column.pack(side='left', fill='x', expand=True)
+                ctk.CTkLabel(column, text=title, text_color=MUTED, font=('Arial', 10), anchor='w').pack(fill='x')
+                ctk.CTkLabel(column, text=f'Median {number(median)}', text_color=INK,
+                             font=('Arial', 13), anchor='w').pack(fill='x')
+                ctk.CTkLabel(column, text=f'SD {number(sd)} {item["unit"]}', text_color=MUTED,
+                             font=('Arial', 10), anchor='w').pack(fill='x')
+            q = item['q_value']
+            q_text = 'Too few bouts' if q is None else f'p {p_number(item["p_value"])} · q {p_number(q)}'
+            ctk.CTkLabel(card, text=q_text, text_color='#166534' if item['supports_insight'] else MUTED,
+                         font=('Arial', 11), anchor='w').pack(fill='x', padx=12, pady=(7, 0))
+            evidence = f'{item["group_bouts"]} vs {item["comparison_bouts"]} bouts · {item["coverage_percent"]:.0f}% valid'
+            if item['direction_consistent'] is False:
+                evidence += '\nBout direction differs'
+            ctk.CTkLabel(card, text=evidence, text_color=MUTED, font=('Arial', 10), anchor='w').pack(fill='x', padx=12, pady=(0, 10))
         self.similarity_table.delete(*self.similarity_table.get_children())
         names = {int(group['group_id']): group.get('group_name', '') for group in self.groups}
         for row in report['similarities']:
             row['group_name'] = names.get(row['group_id'], '')
             name = f'Group {row["group_id"]}' + (f' · {row["group_name"]}' if row['group_name'] else '')
             self.similarity_table.insert('', 'end', iid=str(row['group_id']), values=(row['rank'], name,
-                                         f'{row["distance"]:.3f}', number(row['similarity_score']),
-                                         f'{row["shared_features"]}/{row["available_features"]}'))
-        self.similarity_note.configure(text=f'{len(report["similarities"])} groups meet the shared-data requirements.' if report['similarities'] else report['similarity_status'])
+                                         f'{row["distance"]:.3f}', f'{row["shared_features"]}/{row["available_features"]}'))
+        self.similarity_note.configure(text='' if report['similarities'] else report['similarity_status'])
+
+    def show_analysis_methods(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title('Analysis methods')
+        dialog.geometry('570x560')
+        dialog.transient(self)
+        dialog.configure(fg_color=BG)
+        text = ctk.CTkTextbox(dialog, fg_color=BG, text_color=INK, wrap='word', font=('Arial', 13))
+        text.pack(fill='both', expand=True, padx=20, pady=20)
+        text.insert('1.0', METHODS_TEXT)
+        text.configure(state='disabled')
+        self.button(dialog, 'Close', dialog.destroy, width=90).pack(pady=(0, 16))
 
     def similarity_selected(self, event=None):
         selected = self.similarity_table.selection()
@@ -307,30 +377,9 @@ class PoseViewerMixin:
     def show_pose_report(self, report):
         self.show_group_comparisons(report)
         self.report_button.configure(state='normal')
-        self.pose_status.configure(text=f'{report["frame_count"]:,} video frames · {report["pose_observations"]:,} pose observations\n{report["eligible_motion_pairs"]:,} continuous observation pairs\nConfidence ≥ {report["settings"]["confidence"]:.2f} · Video-aligned sampling')
-        parts = report['body_parts']
-        eligible = [p for p in parts if p['body_speed_px_s'] is not None and p['body_motion_pairs'] >= max(3, report['eligible_motion_pairs'] * .25) and p['coverage_percent'] >= 50 and p['body_part'] != report['settings']['reference']]
-        ordered = sorted(eligible, key=lambda p: p['body_speed_px_s'], reverse=True)
-        if ordered:
-            active, stable = ordered[0], ordered[-1]
-            distinction = sorted((p for p in eligible if p['body_speed_ratio_vs_others'] is not None), key=lambda p: p['body_speed_ratio_vs_others'], reverse=True)
-            hint = (f'Most active relative to body\n{active["body_part"]} · {number(active["body_speed_px_s"], " px/s")}\n\n'
-                    f'Most stable relative to body\n{stable["body_part"]} · {number(stable["body_speed_px_s"], " px/s")}')
-            if distinction:
-                part = distinction[0]
-                hint += f'\n\nHighest speed ratio vs other groups\n{part["body_part"]} · {number(part["body_speed_ratio_vs_others"], "×")}'
-        else:
-            hint = 'Not enough reliable adjacent observations to rank body-relative motion. Try a better-tracked reference or adjust confidence.'
-        self.insight_text.configure(text=hint)
-        chart = self.motion_chart
-        chart.delete('all')
-        for index, part in enumerate(ordered[:6]):
-            y = index * 31 + 10
-            chart.create_text(0, y, text=part['body_part'][:25], fill=MUTED, anchor='nw', font=('Arial', 10))
-            width = 200 * part['body_speed_px_s'] / max(1e-8, ordered[0]['body_speed_px_s'])
-            chart.create_rectangle(0, y+16, max(1, width), y+23, fill=INK, outline='')
-            chart.create_text(210, y+15, text=number(part['body_speed_px_s']), fill=INK, anchor='nw', font=('Arial', 10))
+        self.pose_status.configure(text=f'{report["pose_observations"]:,} observations · {report["tested_features"]} statistical tests')
         self.parts_table.delete(*self.parts_table.get_children())
+        parts = report['body_parts']
         for part in sorted(parts, key=lambda p: -(p['body_speed_px_s'] if p['body_speed_px_s'] is not None else -1)):
             self.parts_table.insert('', 'end', values=(part['body_part'], number(part['median_speed_px_s']), number(part['body_speed_px_s']),
                                                        number(part['coverage_percent']), number(part['body_speed_ratio_vs_others'], '×'),
@@ -342,7 +391,7 @@ class PoseViewerMixin:
             angle = report['angles'][0]
             self.angle_text.configure(text=f'Median {number(angle["median_angle_deg"], "°")} · Range {number(angle["angle_range_deg"], "°")}\nAngular speed {number(angle["median_angular_speed_deg_s"], "°/s")} · {angle["valid_frames"]} valid frames')
         else:
-            self.angle_text.configure(text='Choose three distinct landmarks and update analysis.')
+            self.angle_text.configure(text='Choose three landmarks in Settings.')
 
     def import_pose(self):
         from .gui import dialog_filters
@@ -424,7 +473,7 @@ class PoseViewerMixin:
             return
         self.pose_exporting = True
         self.overlay_export_button.configure(state='disabled')
-        self.pose_status.configure(text='Exporting annotated MP4… You can continue reviewing.')
+        self.pose_status.configure(text='Exporting annotated MP4…')
         pose, parts, threshold, labels = self.pose_data, self.selected_pose_parts(), self.pose_threshold.get(), self.show_part_labels.get()
         source = self.output / f'group_{self.selected["group_id"]}.mp4'
         indices = self.current_pose_indices.copy()

@@ -359,9 +359,10 @@ def export_report(root: Path, report: dict, group_name: str) -> Path:
     try:
         settings = dict(report['settings'], group_id=report['group_id'], group_name=group_name,
                         frame_count=report['frame_count'], eligible_motion_pairs=report['eligible_motion_pairs'], pose_observations=report['pose_observations'],
-                        insight_status=report['insight_status'], similarity_status=report['similarity_status'])
+                        insight_status=report['insight_status'], similarity_status=report['similarity_status'],
+                        statistical_method=report['statistical_method'], tested_features=report['tested_features'])
         (output / 'analysis_settings.json').write_text(json.dumps(settings, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
-        for name in ('body_parts', 'pairs', 'angles', 'insights', 'similarities'):
+        for name in ('body_parts', 'pairs', 'angles', 'insights', 'similarities', 'feature_statistics'):
             rows = report[name]
             if not rows:
                 continue
